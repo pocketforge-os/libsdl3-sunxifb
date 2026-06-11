@@ -1,5 +1,9 @@
 # CMake build directories
-build/
+# Note: `build/` is reserved for the cross-build Dockerfile + CMake toolchain
+# file. Per-developer CMake build trees go in `_build/` (or anywhere matching
+# the patterns below). See build/README.md for the canonical container-based
+# build flow.
+_build/
 cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
@@ -19,5 +23,5 @@ toolchain/
 *~
 .DS_Store
 
-# Cross-build container output
+# Cross-build container artifact output
 out/
