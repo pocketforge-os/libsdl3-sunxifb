@@ -213,4 +213,123 @@ bool SUNXIFB_SetDisplayMode(SDL_VideoDevice *_this, SDL_VideoDisplay *display, S
     return true;
 }
 
+/*****************************************************************************/
+/* SDL Window creation + EGL surface lifecycle                               */
+/*****************************************************************************/
+
+bool SUNXIFB_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_PropertiesID create_props)
+{
+    SDL_WindowData *windowdata;
+    SDL_DisplayData *displaydata;
+
+    /*
+     * SDL3 takes an SDL_DisplayID, not the SDL2 integer index. Resolve the
+     * primary display (we only ever register one in SUNXIFB_VideoInit) and
+     * fetch its private data. Mirrors VIVANTE_CreateWindow.
+     */
+    displaydata = SDL_GetDisplayDriverData(SDL_GetPrimaryDisplay());
+    if (!displaydata) {
+        return SDL_SetError("sunxifb: no display driver data");
+    }
+
+    /* Allocate window internal data */
+    windowdata = (SDL_WindowData *)SDL_calloc(1, sizeof(SDL_WindowData));
+    if (!windowdata) {
+        return false;
+    }
+
+    /* Setup driver data for this window (SDL2 driverdata -> SDL3 internal) */
+    window->internal = windowdata;
+
+    /*
+     * The TSP MIPI-DSI panel is a fixed 1280x720 landscape surface; the
+     * Allwinner disp engine rotates it to the 720x1280 portrait panel below
+     * userspace (rotate code 3 = 270deg), so apps render landscape and the
+     * kernel rotates (build-integration-reference.md §4.5). The vendor backend
+     * hardcoded this for the GE8300; keep it.
+     */
+    window->w = 1280;
+    window->h = 720;
+
+    /*
+     * Create the EGL window surface only when OpenGL was requested, matching
+     * the in-tree vivante backend. SDL3's core (SDL_video.c, SDL_CreateWindow)
+     * loads the EGL library via our registered GL_LoadLibrary hook BEFORE this
+     * callback runs, but only when SDL_WINDOW_OPENGL is set in the *requested*
+     * flags -- so we must not force the flag on here (the vendor SDL2 backend
+     * did, but only because it also self-loaded EGL inside CreateWindow; SDL3
+     * moved that into the core). Guarding on the flag means egl_data is
+     * guaranteed populated whenever we reach SDL_EGL_CreateSurface.
+     *
+     * displaydata->native_display is the zero-initialized EGLNativeWindowType
+     * the NULL_WSEGL DDK treats as "use system default" (see
+     * SDL_sunxifbvideo.h). It is intentionally never assigned.
+     */
+#ifdef SDL_VIDEO_OPENGL_EGL
+    if (window->flags & SDL_WINDOW_OPENGL) {
+        windowdata->egl_surface = SDL_EGL_CreateSurface(_this, window, (NativeWindowType)displaydata->native_display);
+        if (windowdata->egl_surface == EGL_NO_SURFACE) {
+            return SDL_SetError("sunxifb: Can't create EGL window surface");
+        }
+    } else {
+        windowdata->egl_surface = EGL_NO_SURFACE;
+    }
+#endif
+
+    /* One window, it always has focus */
+    SDL_SetMouseFocus(window);
+    SDL_SetKeyboardFocus(window);
+
+    /* Window has been successfully created */
+    return true;
+}
+
+void SUNXIFB_DestroyWindow(SDL_VideoDevice *_this, SDL_Window *window)
+{
+    SDL_WindowData *data;
+
+    data = window->internal;
+    if (data) {
+#ifdef SDL_VIDEO_OPENGL_EGL
+        if (data->egl_surface != EGL_NO_SURFACE) {
+            SDL_EGL_DestroySurface(_this, data->egl_surface);
+        }
+#endif
+        SDL_free(data);
+    }
+    window->internal = NULL;
+}
+
+void SUNXIFB_SetWindowTitle(SDL_VideoDevice *_this, SDL_Window *window)
+{
+}
+
+bool SUNXIFB_SetWindowPosition(SDL_VideoDevice *_this, SDL_Window *window)
+{
+    return SDL_Unsupported();
+}
+
+void SUNXIFB_SetWindowSize(SDL_VideoDevice *_this, SDL_Window *window)
+{
+}
+
+void SUNXIFB_ShowWindow(SDL_VideoDevice *_this, SDL_Window *window)
+{
+}
+
+void SUNXIFB_HideWindow(SDL_VideoDevice *_this, SDL_Window *window)
+{
+}
+
+/*****************************************************************************/
+/* SDL event functions                                                       */
+/*****************************************************************************/
+
+void SUNXIFB_PumpEvents(SDL_VideoDevice *_this)
+{
+#ifdef SDL_INPUT_LINUXEV
+    SDL_EVDEV_Poll();
+#endif
+}
+
 #endif /* SDL_VIDEO_DRIVER_SUNXIFB */
