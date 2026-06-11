@@ -4102,7 +4102,10 @@ endif()
 
 if(SDL_SHARED)
   set_target_properties(SDL3-shared PROPERTIES
-    OUTPUT_NAME "SDL3"
+    # PocketForge: rename the shared library to libSDL3-pocketforge.so.0 so it
+    # is unambiguous vs. Steam Link's own bundled libSDL3.so.0 (tsp-8si.10).
+    # SDL3_DYNAMIC_API binds by explicit path, so the soname change is harmless.
+    OUTPUT_NAME "SDL3-pocketforge"
     POSITION_INDEPENDENT_CODE TRUE
     LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/dynapi/SDL_dynapi.sym"
     INTERFACE_LINK_DEPENDS "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/dynapi/SDL_dynapi.sym>"
