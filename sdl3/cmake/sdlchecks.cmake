@@ -818,6 +818,43 @@ macro(CheckVivante)
 endmacro()
 
 # Requires:
+# - EGL/GLESv2 from the vendor PowerVR NULL_WSEGL DDK (no pkg-config ships with
+#   it, so this is modelled on CheckVivante's non-VDK branch). Standard Khronos
+#   headers only: per tsp-8si.7, the vendor blob uses the plain __unix__
+#   eglplatform.h fallback types, so NO -DEGL_API_FB / -DLINUX (those are a
+#   Mali cargo-cult and are unnecessary/harmful here).
+macro(CheckSUNXIFB)
+  if(SDL_SUNXIFB)
+    # The vendor PowerVR DDK ships no pkg-config and lives outside the
+    # cross-sysroot (it bind-mounts into the build container at /work/blobs).
+    # Point the build at it with -DSUNXIFB_DDK_ROOT=/work/blobs/tsp/<BVNC>;
+    # we append it to the find-root so the toolchain's
+    # CMAKE_FIND_ROOT_PATH_MODE_{INCLUDE,LIBRARY}=ONLY still finds the EGL/GLES
+    # headers and .so files there.
+    if(SUNXIFB_DDK_ROOT)
+      list(APPEND CMAKE_FIND_ROOT_PATH "${SUNXIFB_DDK_ROOT}")
+      list(APPEND CMAKE_REQUIRED_INCLUDES "${SUNXIFB_DDK_ROOT}/include")
+    endif()
+    check_c_source_compiles("
+        #include <EGL/egl.h>
+        #include <EGL/eglext.h>
+        int main(int argc, char** argv) { return 0; }" HAVE_SUNXIFB_EGL_HEADERS)
+    find_library(SUNXIFB_EGL_LIB NAMES EGL)
+    find_library(SUNXIFB_GLES_LIB NAMES GLESv2)
+    if(HAVE_SUNXIFB_EGL_HEADERS AND SUNXIFB_EGL_LIB AND SUNXIFB_GLES_LIB)
+      set(HAVE_SUNXIFB TRUE)
+      set(HAVE_SDL_VIDEO TRUE)
+
+      sdl_glob_sources("${SDL3_SOURCE_DIR}/src/video/sunxifb/*.c")
+      set(SDL_VIDEO_DRIVER_SUNXIFB 1)
+      sdl_link_dependency(sunxifb
+        LIBS ${SUNXIFB_EGL_LIB} ${SUNXIFB_GLES_LIB}
+        INCLUDES $<$<BOOL:${SUNXIFB_DDK_ROOT}>:${SUNXIFB_DDK_ROOT}/include>)
+    endif()
+  endif()
+endmacro()
+
+# Requires:
 # - n/a
 macro(CheckOpenVR)
   if(SDL_OPENVR)
