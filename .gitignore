@@ -1,0 +1,23 @@
+# CMake build directories
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+
+# Compiled objects
+*.o
+*.so
+*.so.*
+*.a
+
+# Toolchain downloads
+toolchain/
+
+# Editor
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Cross-build container output
+out/
