@@ -106,6 +106,16 @@ static SDL_VideoDevice *SUNXIFB_Create(void)
 
     device->PumpEvents = SUNXIFB_PumpEvents;
 
+    /*
+     * This is a single-display fbdev backend with no window manager; every
+     * window is implicitly fullscreen. Setting FULLSCREEN_ONLY makes SDL3
+     * core auto-resize windows to display bounds and set SDL_WINDOW_FULLSCREEN,
+     * matching the PSP/Vita/N3DS/RISC OS backends. Without this, apps that
+     * request e.g. 640x480 (testgles2's default) get a viewport mismatch
+     * against the EGL surface and render into a corner of the panel.
+     */
+    device->device_caps = VIDEO_DEVICE_CAPS_FULLSCREEN_ONLY;
+
     return device;
 }
 
@@ -247,7 +257,14 @@ bool SUNXIFB_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_Proper
      * userspace (rotate code 3 = 270deg), so apps render landscape and the
      * kernel rotates (build-integration-reference.md §4.5). The vendor backend
      * hardcoded this for the GE8300; keep it.
+     *
+     * Zero the position too: SDL3 core may have set window->x/y to a centered
+     * offset for the app's requested (smaller) size before our callback runs.
+     * On a compositorless fbdev backend, position is meaningless; zeroing it
+     * avoids stale values in SDL's internal bookkeeping.
      */
+    window->x = 0;
+    window->y = 0;
     window->w = 1280;
     window->h = 720;
 
