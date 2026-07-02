@@ -34,7 +34,7 @@ set -eu
 
 OUT=${OUT:-/work/out}
 SRC=${SRC:-/work/src/sdl3}
-BLOBS=${BLOBS:-/work/blobs/tsp/22.102.54.38}
+BLOBS=${BLOBS:-/work/blobs/sunxi/a133/22.102.54.38}
 
 # Pin DDK root unless caller already set it (multi-BVNC futures want override).
 DDK_ROOT="${SUNXIFB_DDK_ROOT:-${BLOBS}}"
