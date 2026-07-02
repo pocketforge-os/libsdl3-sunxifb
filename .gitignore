@@ -4,6 +4,7 @@
 # the patterns below). See build/README.md for the canonical container-based
 # build flow.
 _build/
+_build*/
 cmake-build-*/
 CMakeCache.txt
 CMakeFiles/

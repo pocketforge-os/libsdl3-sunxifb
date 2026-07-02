@@ -113,10 +113,25 @@ ARG TOOLCHAIN_TRIPLET=aarch64-none-linux-gnu
 #                         sunxi-tools
 #   Debian rootfs:        debootstrap qemu-user-static binfmt-support
 #   Scripting glue:       python3
+#   SDL3 cross-deps (arm64): libasound2-dev (ALSA), libudev-dev (input), libdbus-1-dev (IPC),
+#                            libibus-1.0-dev (text input — pulled by SDL_DIALOG=ON), libpulse-dev,
+#                            libdecor-0-dev, libdrm-dev. All multiarch-prefixed `:arm64` so
+#                            cross-build pkg-config / find_package picks up the aarch64 variant.
+#                            We add the arm64 architecture and a minimal sources.list with the
+#                            arm64 repo before installing.
 #
 # `--no-install-recommends` keeps the layer slim; `apt-get clean` + lists rm
 # at end of layer for reproducibility.
-RUN apt-get update \
+RUN dpkg --add-architecture arm64 \
+ && printf '%s\n' \
+        'deb [arch=amd64] http://deb.debian.org/debian bookworm main' \
+        'deb [arch=amd64] http://deb.debian.org/debian bookworm-updates main' \
+        'deb [arch=amd64] http://security.debian.org/debian-security bookworm-security main' \
+        'deb [arch=arm64] http://deb.debian.org/debian bookworm main' \
+        'deb [arch=arm64] http://deb.debian.org/debian bookworm-updates main' \
+        'deb [arch=arm64] http://security.debian.org/debian-security bookworm-security main' \
+        > /etc/apt/sources.list \
+ && apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
         cmake \
@@ -140,8 +155,62 @@ RUN apt-get update \
         qemu-user-static \
         binfmt-support \
         python3 \
+        libasound2-dev:arm64 \
+        libpulse-dev:arm64 \
+        libudev-dev:arm64 \
+        libdbus-1-dev:arm64 \
+        libdrm-dev:arm64 \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
+
+# Migrate the arm64-multiarch artifacts into the cross-toolchain's sysroot so
+# downstream find_library / pkg-config / find_package work without per-build
+# CMAKE_FIND_ROOT_PATH overrides. Headers go under usr/include (no per-arch
+# subdir on cross sysroots); libs go under usr/lib (no aarch64-linux-gnu
+# subdir — the toolchain links by `-L<sysroot>/usr/lib`). Pkg-config files
+# get their `libdir=` rewritten so consumers don't need PKG_CONFIG_PATH gym.
+ARG CROSS_SYSROOT=/opt/arm-10.3-2021.07/aarch64-none-linux-gnu/libc
+RUN set -eux; \
+    SRC_LIB=/usr/lib/aarch64-linux-gnu; \
+    SRC_INC=/usr/include; \
+    DST_LIB=${CROSS_SYSROOT}/usr/lib; \
+    DST_INC=${CROSS_SYSROOT}/usr/include; \
+    PKG_DST=${DST_LIB}/pkgconfig; \
+    mkdir -p "${DST_LIB}" "${DST_INC}" "${PKG_DST}"; \
+    # Lib files (preserve symlinks). Don't blast the whole multiarch dir — only
+    # the packages we explicitly added, so we don't accidentally shadow glibc.
+    for pat in \
+        'libasound*' \
+        'libpulse*' \
+        'libudev*' \
+        'libdbus-1*' \
+        'libdrm*' ; do \
+        find "${SRC_LIB}" -maxdepth 1 -name "${pat}" -exec cp -a {} "${DST_LIB}/" \; ; \
+    done; \
+    # Pkg-config: copy files, rewrite multiarch lib paths to sysroot-relative.
+    if [ -d "${SRC_LIB}/pkgconfig" ]; then \
+        for pc in alsa libpulse libpulse-simple libudev dbus-1 libdrm libkms; do \
+            f="${SRC_LIB}/pkgconfig/${pc}.pc"; \
+            [ -f "$f" ] || continue; \
+            sed 's|/usr/lib/aarch64-linux-gnu|${prefix}/lib|g; s|/usr/include|${prefix}/include|g; s|^prefix=.*|prefix='"${CROSS_SYSROOT}"'/usr|' \
+                "$f" > "${PKG_DST}/${pc}.pc"; \
+        done; \
+    fi; \
+    # Headers (alsa/pulse/dbus-1/libudev.h/drm).
+    for d in alsa pulse dbus-1.0 dbus libdrm; do \
+        if [ -d "${SRC_INC}/${d}" ]; then cp -a "${SRC_INC}/${d}" "${DST_INC}/"; fi; \
+    done; \
+    # Arch-specific multiarch includes (dbus-arch-deps.h lives here).
+    if [ -d "${SRC_LIB}/dbus-1.0/include/dbus" ]; then \
+        mkdir -p "${DST_INC}/dbus-1.0/dbus"; \
+        cp -a "${SRC_LIB}/dbus-1.0/include/dbus/." "${DST_INC}/dbus-1.0/dbus/"; \
+    fi; \
+    for h in libudev.h alsa-symbols.h alsa-version.h; do \
+        if [ -f "${SRC_INC}/${h}" ]; then cp -a "${SRC_INC}/${h}" "${DST_INC}/"; fi; \
+    done; \
+    # Verify: the toolchain's pkg-config needs to find alsa via PKG_CONFIG_LIBDIR=sysroot/usr/lib/pkgconfig
+    PKG_CONFIG_LIBDIR=${PKG_DST} pkg-config --exists alsa; \
+    echo "Cross sysroot now has: $(ls ${DST_LIB}/libasound* ${DST_LIB}/libpulse* ${DST_LIB}/libudev* | wc -l) lib files"
 
 # Pull the unpacked toolchain across from stage 1.
 COPY --from=toolchain-fetch /opt/arm-${TOOLCHAIN_VERSION} /opt/arm-${TOOLCHAIN_VERSION}
