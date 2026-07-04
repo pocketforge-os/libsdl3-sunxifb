@@ -851,10 +851,18 @@ static bool SDL_EGL_PrivateChooseConfig(SDL_VideoDevice *_this, bool set_config_
         } else {
             attribs[i++] = EGL_OPENGL_ES_BIT;
         }
-        _this->egl_data->eglBindAPI(EGL_OPENGL_ES_API);
+        // An unchecked failure here (e.g. libEGL registered zero client APIs
+        // because the GLES client driver wasn't dlopen-able) lets a doomed
+        // eglChooseConfig proceed — the PowerVR DDK 1.19 blob NULL-derefs
+        // inside IMGeglChooseConfig in that state (tsp-ve5/tsp-489).
+        if (!_this->egl_data->eglBindAPI(EGL_OPENGL_ES_API)) {
+            return SDL_SetError("eglBindAPI(EGL_OPENGL_ES_API) failed — no OpenGL ES client API registered with EGL");
+        }
     } else {
         attribs[i++] = EGL_OPENGL_BIT;
-        _this->egl_data->eglBindAPI(EGL_OPENGL_API);
+        if (!_this->egl_data->eglBindAPI(EGL_OPENGL_API)) {
+            return SDL_SetError("eglBindAPI(EGL_OPENGL_API) failed — no OpenGL client API registered with EGL");
+        }
     }
 
     if (_this->egl_data->egl_surfacetype) {
