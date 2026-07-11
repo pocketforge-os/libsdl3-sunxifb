@@ -269,27 +269,53 @@ bool SUNXIFB_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_Proper
     window->h = 720;
 
     /*
-     * Create the EGL window surface only when OpenGL was requested, matching
-     * the in-tree vivante backend. SDL3's core (SDL_video.c, SDL_CreateWindow)
-     * loads the EGL library via our registered GL_LoadLibrary hook BEFORE this
-     * callback runs, but only when SDL_WINDOW_OPENGL is set in the *requested*
-     * flags -- so we must not force the flag on here (the vendor SDL2 backend
-     * did, but only because it also self-loaded EGL inside CreateWindow; SDL3
-     * moved that into the core). Guarding on the flag means egl_data is
-     * guaranteed populated whenever we reach SDL_EGL_CreateSurface.
+     * tsp-osr / epic E6 decision R-E "Fix A" (tsp-fr2n.2): ALWAYS create the EGL
+     * window surface -- even when the caller did NOT request SDL_WINDOW_OPENGL.
      *
-     * displaydata->native_display is the zero-initialized EGLNativeWindowType
-     * the NULL_WSEGL DDK treats as "use system default" (see
-     * SDL_sunxifbvideo.h). It is intentionally never assigned.
+     * ROOT CAUSE (device-free): on sunxifb the SDL software renderer is not
+     * compiled in and the backend registers no CreateWindowFramebuffer hooks, so
+     * EVERY SDL_Renderer on this backend IS the GLES2-over-PowerVR path. SDL3's
+     * RENDER path (SDL_CreateRenderer, the canonical usage for a launcher/app UI)
+     * creates its window WITHOUT SDL_WINDOW_OPENGL and then makes a GLES2 context
+     * current against windowdata->egl_surface. The OLD code left that surface as
+     * EGL_NO_SURFACE (== NULL) for a non-OPENGL window, and PowerVR's
+     * libIMGegl.so then dereferences NULL+0x8 -> SIGSEGV (SEGV_MAPERR si_addr=0x8;
+     * repro: testdraw / testdrawchessboard / testsprite, tsp-osr). Creating the
+     * surface unconditionally hands the renderer a valid surface to bind, so the
+     * NULL deref cannot happen regardless of the app's window flags.
+     *
+     * EGL-LOAD ORDERING: SDL core only invokes our GL_LoadLibrary hook (which
+     * populates _this->egl_data) when SDL_WINDOW_OPENGL is set in the *requested*
+     * flags. For a non-OPENGL window egl_data is therefore still NULL when we get
+     * here, and SDL_EGL_CreateSurface would fail cleanly (returning
+     * EGL_NO_SURFACE) rather than create the surface. So we must self-load EGL
+     * first -- exactly as the vendor SDL2 mali-fbdev backend did inside
+     * CreateWindow (SDL3 moved that load into the core, but core gates it on the
+     * flag we deliberately are no longer requiring). GL_LoadLibrary is idempotent
+     * for our purposes here: we only call it when egl_data is not yet populated.
+     *
+     * The NULL_WSEGL DDK backs the surface with a null WSEGL resource, so an EGL
+     * surface on a window that never issues GL draws costs nothing.
+     *
+     * displaydata->native_display is the zero-initialized EGLNativeWindowType the
+     * NULL_WSEGL DDK treats as "use system default" (see SDL_sunxifbvideo.h). It
+     * is intentionally never assigned.
+     *
+     * VERIFICATION: this is the DEVICE-FREE owned-source root-cause fix; the
+     * on-panel repro on real PowerVR silicon (the surviving proof that the NULL
+     * deref is gone AND that a non-GL RENDER window still presents) is the C8
+     * hardware gate (tsp-fr2n.8), which needs the device + the owner's OK.
      */
 #ifdef SDL_VIDEO_OPENGL_EGL
-    if (window->flags & SDL_WINDOW_OPENGL) {
-        windowdata->egl_surface = SDL_EGL_CreateSurface(_this, window, (NativeWindowType)displaydata->native_display);
-        if (windowdata->egl_surface == EGL_NO_SURFACE) {
-            return SDL_SetError("sunxifb: Can't create EGL window surface");
+    if (!_this->egl_data) {
+        if (!_this->GL_LoadLibrary(_this, NULL)) {
+            return SDL_SetError("sunxifb: EGL load failed for non-GL RENDER window: %s",
+                                SDL_GetError());
         }
-    } else {
-        windowdata->egl_surface = EGL_NO_SURFACE;
+    }
+    windowdata->egl_surface = SDL_EGL_CreateSurface(_this, window, (NativeWindowType)displaydata->native_display);
+    if (windowdata->egl_surface == EGL_NO_SURFACE) {
+        return SDL_SetError("sunxifb: Can't create EGL window surface");
     }
 #endif
 
