@@ -88,10 +88,7 @@ typedef struct GLES2_Context
 #define PF_CUBES_BASE          4
 #define PF_CUBES_GROWTH        2.0
 #define PF_CUBES_CAP           4096
-#define PF_LAYERS_PER_STAGE    2      /* layers = 1 + 2*stage */
-#define PF_LAYERS_CAP          64
-#define PF_ITERS_BASE          2      /* frag iters = 2 + 3*stage */
-#define PF_ITERS_PER_STAGE     3
+#define PF_LAYERS_CAP          64     /* fill schedule: see stage_fill_table */
 #define PF_PARTICLES_BASE      500    /* particles = 500*(stage+1)^2 */
 #define PF_PARTICLES_CAP       200000
 #define PF_MAX_STAGES          32
@@ -265,7 +262,10 @@ static const char *quad_frag_src_tmpl =
     "        acc += sin(p.x * 1.7 + fi) * cos(p.y * 1.3 - fi);\n"
     "    }\n"
     "    float v = 0.5 + 0.5 * sin(acc);\n"
-    "    gl_FragColor = vec4(v * 0.040, v * 0.024, v * 0.052, 1.0);\n"
+    /* weights calibrated for panel visibility (device window 2026-07-16): the
+     * original 0.040/0.024/0.052 was invisible on the webcam evidence — the
+     * plasma churn must be SEEN escalating (acceptance is visual) */
+    "    gl_FragColor = vec4(v * 0.14, v * 0.09, v * 0.18, 1.0);\n"
     "}\n";
 
 static const char *particle_vert_src =
@@ -506,15 +506,45 @@ static int stage_cubes(int stage)
     return (int)n;
 }
 
+/* Per-stage fragment-load schedule (fill cost ≈ layers × iters), CALIBRATED on
+ * the A133/GE8300 (2026-07-16 device window, run 1 evidence on bead
+ * tsp-147u.8.5): measured fps ≈ min(~60, K/cost) with K ≈ 300, and the display
+ * path paces ~60 even at swap-interval 0 — so cost growing ~1.55x/stage yields
+ * the owner's target curve on THIS device: ~60, 60, 37, 25, 17, 11, 7.5, 4.8,
+ * 3, ~2 fps. (The original linear schedule front-loaded a 7.5x jump at stage 1
+ * — 60→15 fps — and bottomed at 0.6 fps; run-1 data drove this retune.)
+ * Stages past 9 (a future strong device runs --stages >10) keep escalating at
+ * ~1.55x cost/stage via the extrapolation below, capped by PF_LAYERS_CAP. */
+static const int stage_fill_table[10][2] = {
+    /* layers, iters */
+    { 1, 3 }, { 1, 5 }, { 2, 4 }, { 2, 6 }, { 3, 6 },
+    { 4, 7 }, { 5, 8 }, { 7, 9 }, { 9, 11 }, { 12, 13 },
+};
+
 static int stage_layers(int stage)
 {
-    int n = 1 + PF_LAYERS_PER_STAGE * stage;
-    return (n > PF_LAYERS_CAP) ? PF_LAYERS_CAP : n;
+    double n = 12.0;
+    int i;
+    if (stage < 10) {
+        return stage_fill_table[stage][0];
+    }
+    for (i = 10; i <= stage; i++) {
+        n *= 1.35;
+    }
+    return (n > PF_LAYERS_CAP) ? PF_LAYERS_CAP : (int)n;
 }
 
 static int stage_iters(int stage)
 {
-    return PF_ITERS_BASE + PF_ITERS_PER_STAGE * stage;
+    double n = 13.0;
+    int i;
+    if (stage < 10) {
+        return stage_fill_table[stage][1];
+    }
+    for (i = 10; i <= stage; i++) {
+        n *= 1.15;
+    }
+    return (n > 64) ? 64 : (int)n;
 }
 
 static int stage_particles(int stage)
@@ -862,7 +892,7 @@ int main(int argc, char *argv[])
                     ctx.glBufferSubData(GL_ARRAY_BUFFER, 0, particles * 3 * sizeof(float), sim.upload);
                     ctx.glEnableVertexAttribArray(particle_shader.attr_particle);
                     ctx.glVertexAttribPointer(particle_shader.attr_particle, 3, GL_FLOAT, GL_FALSE, 0, NULL);
-                    ctx.glUniform4f(particle_shader.unif_misc, 2.0f, 0.0f, 0.0f, 0.0f);
+                    ctx.glUniform4f(particle_shader.unif_misc, 3.0f, 0.0f, 0.0f, 0.0f);
                     ctx.glDrawArrays(GL_POINTS, 0, particles);
                     ctx.glDisableVertexAttribArray(particle_shader.attr_particle);
                 }
