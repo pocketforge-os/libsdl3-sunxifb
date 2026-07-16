@@ -65,7 +65,12 @@ typedef struct thread_data
 
 static SDLTest_CommonState *state;
 static SDL_GLContext *context = NULL;
-static int depth = 16;
+/* PocketForge (tsp-7kpp): default depth buffer 16 -> 24 bits. Upstream's
+ * 16-bit default, combined with this app's 0.01..100 near/far range, leaves
+ * ~1% -of-cube-size depth resolution at the cube and z-fights visibly on the
+ * A133 PowerVR path (which grants exactly the 16 bits requested). 24-bit is
+ * universally available on this hardware; override back with --zdepth 16. */
+static int depth = 24;
 static bool suspend_when_occluded;
 static GLES2_Context ctx;
 static shader_data *datas;
