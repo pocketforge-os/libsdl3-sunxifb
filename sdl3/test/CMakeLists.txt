@@ -428,6 +428,9 @@ elseif(IOS OR TVOS)
     target_link_libraries(testgles PRIVATE "${GLES_LIB}")
 endif()
 add_sdl_test_executable(testgles2 SOURCES testgles2.c NAME83 gles2)
+# pf-gfxbench — PocketForge owned ramping GPU+CPU stress benchmark (bead tsp-147u.8.5);
+# shipped into the dev image beside testgles2 (image/build/Dockerfile.pf sdl stage).
+add_sdl_test_executable(pf-gfxbench SOURCES pf_gfxbench.c NAME83 gfxbench)
 add_sdl_test_executable(testhaptic SOURCES testhaptic.c NAME83 haptic)
 add_sdl_test_executable(testhotplug SOURCES testhotplug.c NAME83 hotplug)
 add_sdl_test_executable(testpen SOURCES testpen.c NAME83 pen)
