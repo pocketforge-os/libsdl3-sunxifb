@@ -291,8 +291,33 @@ bool SUNXIFB_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_Proper
      * EGL_NO_SURFACE) rather than create the surface. So we must self-load EGL
      * first -- exactly as the vendor SDL2 mali-fbdev backend did inside
      * CreateWindow (SDL3 moved that load into the core, but core gates it on the
-     * flag we deliberately are no longer requiring). GL_LoadLibrary is idempotent
-     * for our purposes here: we only call it when egl_data is not yet populated.
+     * flag we deliberately are no longer requiring).
+     *
+     * WHICH load call MATTERS (tsp-4i6u): use the core REFCOUNTED WRAPPER
+     * SDL_GL_LoadLibrary(NULL) -- NOT the raw backend hook _this->GL_LoadLibrary().
+     * This is precisely what core does for a real SDL_WINDOW_OPENGL window
+     * (SDL_video.c SDL_CreateWindow -> SDL_GL_LoadLibrary(NULL) before this
+     * callback). The wrapper populates egl_data AND increments
+     * _this->gl_config.driver_loaded in lockstep; the raw hook populates egl_data
+     * only. The original Fix A called the raw hook, leaving egl_data != NULL while
+     * driver_loaded == 0. That desync broke the SDL_Renderer path: SDL_CreateRenderer
+     * -> GLES2_CreateRenderer reconfigures this (non-GL) window to add
+     * SDL_WINDOW_OPENGL, and SDL_RecreateWindow then calls the wrapper
+     * SDL_GL_LoadLibrary(NULL) again. With driver_loaded==0 the wrapper does NOT take
+     * its already-loaded fast path -- it re-invokes the backend load, which hits
+     * SDL_EGL_LoadLibraryOnly's "egl_data already set" guard and fails with the
+     * (misleadingly named) "EGL context already created"; the auto-pick path then
+     * renames that to "Couldn't find matching render driver". Going through the
+     * wrapper here keeps driver_loaded consistent, so the reconfigure's load
+     * fast-paths (no re-load, no false "already created") and the renderer binds a
+     * valid surface. We only load when egl_data is not yet populated, so a real GL
+     * window (core already loaded EGL) skips this and is unaffected.
+     *
+     * TRADEOFF: a pure non-GL window that never becomes a renderer holds a +1 on
+     * the EGL-lib refcount for the process lifetime (SDL_DestroyWindow only unloads
+     * when the window carries SDL_WINDOW_OPENGL). Benign for our single-app
+     * launcher/kiosk model -- EGL simply stays resident -- and far safer than
+     * hand-balancing a refcount across SDL's destroy/recreate dance.
      *
      * The NULL_WSEGL DDK backs the surface with a null WSEGL resource, so an EGL
      * surface on a window that never issues GL draws costs nothing.
@@ -303,12 +328,12 @@ bool SUNXIFB_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_Proper
      *
      * VERIFICATION: this is the DEVICE-FREE owned-source root-cause fix; the
      * on-panel repro on real PowerVR silicon (the surviving proof that the NULL
-     * deref is gone AND that a non-GL RENDER window still presents) is the C8
-     * hardware gate (tsp-fr2n.8), which needs the device + the owner's OK.
+     * deref is gone AND that a non-GL RENDER window now yields a WORKING renderer)
+     * is the C8 hardware gate (tsp-fr2n.8), which needs the device + the owner's OK.
      */
 #ifdef SDL_VIDEO_OPENGL_EGL
     if (!_this->egl_data) {
-        if (!_this->GL_LoadLibrary(_this, NULL)) {
+        if (!SDL_GL_LoadLibrary(NULL)) {
             return SDL_SetError("sunxifb: EGL load failed for non-GL RENDER window: %s",
                                 SDL_GetError());
         }
