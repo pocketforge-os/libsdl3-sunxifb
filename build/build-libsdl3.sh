@@ -71,11 +71,5 @@ echo
 echo "=== artifact verification ==="
 SO="${OUT}/libSDL3-pocketforge.so.0.5.0"
 sha256sum "${SO}"
-if aarch64-none-linux-gnu-readelf -d "${SO}" | grep -Eq '\((RPATH|RUNPATH)\)'; then
-  echo "FATAL: shipped SDL artifact contains RPATH or RUNPATH"
-  exit 1
-fi
-aarch64-none-linux-gnu-nm -D "${SO}" | grep DYNAPI_entry || { echo "FATAL: SDL_DYNAPI_entry not exported"; exit 1; }
-strings "${SO}" | grep -E '^(x11|wayland|kmsdrm|sunxifb|dummy|offscreen|vivante|rpi)$' | sort -u
-/usr/local/bin/check-glibc-symver "${SO}"
+"$(dirname "$0")/verify-libsdl3-artifact.sh" "${SO}"
 echo "OK"
