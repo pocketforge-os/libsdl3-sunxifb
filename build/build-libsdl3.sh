@@ -42,6 +42,7 @@ DDK_ROOT="${SUNXIFB_DDK_ROOT:-${BLOBS}}"
 cmake -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=/opt/cmake/toolchain-arm-10.3-2021.07.cmake \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_SKIP_RPATH=ON \
   -DSUNXIFB_DDK_ROOT="${DDK_ROOT}" \
   \
   -DSDL_SUNXIFB=ON \
@@ -58,6 +59,7 @@ cmake -G Ninja \
   -DSDL_ALSA=ON -DSDL_PULSEAUDIO=ON \
   \
   -DSDL_UNIX_CONSOLE_BUILD=ON \
+  -DSDL_RPATH=OFF \
   -DSDL_TESTS=ON \
   -DSDL_SHARED=ON -DSDL_STATIC=OFF \
   \
@@ -69,6 +71,10 @@ echo
 echo "=== artifact verification ==="
 SO="${OUT}/libSDL3-pocketforge.so.0.5.0"
 sha256sum "${SO}"
+if aarch64-none-linux-gnu-readelf -d "${SO}" | grep -Eq '\((RPATH|RUNPATH)\)'; then
+  echo "FATAL: shipped SDL artifact contains RPATH or RUNPATH"
+  exit 1
+fi
 aarch64-none-linux-gnu-nm -D "${SO}" | grep DYNAPI_entry || { echo "FATAL: SDL_DYNAPI_entry not exported"; exit 1; }
 strings "${SO}" | grep -E '^(x11|wayland|kmsdrm|sunxifb|dummy|offscreen|vivante|rpi)$' | sort -u
 /usr/local/bin/check-glibc-symver "${SO}"

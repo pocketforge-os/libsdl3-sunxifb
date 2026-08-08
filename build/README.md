@@ -73,6 +73,20 @@ manufacture short-name symlinks — the toolchain has zero by design.
 
 ## Verify a built artifact
 
+The canonical `build/build-libsdl3.sh` recipe disables both SDL pkg-config
+RPATH handling and CMake build/install RPATH generation. The shipped
+`libSDL3-pocketforge.so.0` must have neither `DT_RPATH` nor `DT_RUNPATH`: a
+host build path is not a valid runtime dependency, and a trailing empty
+loader-path component would search the current working directory. Artifact
+verification fails closed if either dynamic tag is present.
+
+The source-level contract for this policy can be checked without the cross
+toolchain or proprietary DDK input:
+
+```sh
+build/test-build-libsdl3-contract.sh
+```
+
 ```sh
 docker run --rm \
     -v "$(pwd)/out:/work/out:ro" \
