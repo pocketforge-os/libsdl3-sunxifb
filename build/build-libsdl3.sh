@@ -36,20 +36,35 @@ OUT=${OUT:-/work/out}
 SRC=${SRC:-/work/src/sdl3}
 BLOBS=${BLOBS:-/work/blobs/sunxi/a133/22.102.54.38}
 
-# GPU model discriminator (tsp-mc9m.41.924.6 / C3): "ddk" (closed PowerVR DDK, default)
-# or "open" (a133-open's Mesa GLES/EGL/GBM, Zink gallium). CheckSUNXIFB
+# GPU model discriminator (tsp-mc9m.41.924.6 / C3): "ddk" (closed PowerVR DDK) or
+# "open" (a133-open's Mesa GLES/EGL/GBM, Zink gallium) — no other value is valid, and
+# there is deliberately no default (see the fail-closed comment below). CheckSUNXIFB
 # (sdl3/cmake/sdlchecks.cmake) only ever uses SUNXIFB_DDK_ROOT as a generic
 # CMAKE_FIND_ROOT_PATH entry to locate `include/EGL/egl.h` + `libEGL.so`/`libGLESv2.so`
 # — it is not DDK-specific despite the name, so pointing it at the open Mesa install
 # tree's prefix (which ships the same include/EGL + lib/libEGL.so shape) needs no
 # cmake change at all.
-PF_GPU_MODEL="${PF_GPU_MODEL:-ddk}"
-if [ "${PF_GPU_MODEL}" = "open" ]; then
-  DDK_ROOT="${SUNXIFB_MESA_ROOT:?SUNXIFB_MESA_ROOT must be set for PF_GPU_MODEL=open (the open Mesa install tree's prefix, e.g. .../usr/local — the C1 gpu-um-mesa stage's output)}"
-else
-  # Pin DDK root unless caller already set it (multi-BVNC futures want override).
-  DDK_ROOT="${SUNXIFB_DDK_ROOT:-${BLOBS}}"
-fi
+# Fail CLOSED, not open (coordinator review finding on this PR): an UNKNOWN or EMPTY
+# PF_GPU_MODEL must be a loud error, never a silent fall-through to the DDK branch —
+# the same property B's PF_SOC validation enforces (platform/core/profile.py
+# validate() now requires [device].soc so a broken profile errors loudly rather than
+# resolving PF_SOC empty). Deliberately NO ":-ddk" default here (unlike this script's
+# other env vars): the caller (Dockerfile.pf's sdl stage) always resolves and passes
+# an explicit PF_GPU_MODEL, so requiring it here costs production nothing and closes
+# the silent-typo path a bare default would otherwise leave open.
+case "${PF_GPU_MODEL:-}" in
+  open)
+    DDK_ROOT="${SUNXIFB_MESA_ROOT:?SUNXIFB_MESA_ROOT must be set for PF_GPU_MODEL=open (the open Mesa install tree's prefix, e.g. .../usr/local — the C1 gpu-um-mesa stage's output)}"
+    ;;
+  ddk)
+    # Pin DDK root unless caller already set it (multi-BVNC futures want override).
+    DDK_ROOT="${SUNXIFB_DDK_ROOT:-${BLOBS}}"
+    ;;
+  *)
+    echo "FATAL: PF_GPU_MODEL must be 'ddk' or 'open', got '${PF_GPU_MODEL:-}' (unset/empty counts as invalid)" >&2
+    exit 1
+    ;;
+esac
 
 cmake -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=/opt/cmake/toolchain-arm-10.3-2021.07.cmake \
