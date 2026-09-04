@@ -36,8 +36,20 @@ OUT=${OUT:-/work/out}
 SRC=${SRC:-/work/src/sdl3}
 BLOBS=${BLOBS:-/work/blobs/sunxi/a133/22.102.54.38}
 
-# Pin DDK root unless caller already set it (multi-BVNC futures want override).
-DDK_ROOT="${SUNXIFB_DDK_ROOT:-${BLOBS}}"
+# GPU model discriminator (tsp-mc9m.41.924.6 / C3): "ddk" (closed PowerVR DDK, default)
+# or "open" (a133-open's Mesa GLES/EGL/GBM, Zink gallium). CheckSUNXIFB
+# (sdl3/cmake/sdlchecks.cmake) only ever uses SUNXIFB_DDK_ROOT as a generic
+# CMAKE_FIND_ROOT_PATH entry to locate `include/EGL/egl.h` + `libEGL.so`/`libGLESv2.so`
+# — it is not DDK-specific despite the name, so pointing it at the open Mesa install
+# tree's prefix (which ships the same include/EGL + lib/libEGL.so shape) needs no
+# cmake change at all.
+PF_GPU_MODEL="${PF_GPU_MODEL:-ddk}"
+if [ "${PF_GPU_MODEL}" = "open" ]; then
+  DDK_ROOT="${SUNXIFB_MESA_ROOT:?SUNXIFB_MESA_ROOT must be set for PF_GPU_MODEL=open (the open Mesa install tree's prefix, e.g. .../usr/local — the C1 gpu-um-mesa stage's output)}"
+else
+  # Pin DDK root unless caller already set it (multi-BVNC futures want override).
+  DDK_ROOT="${SUNXIFB_DDK_ROOT:-${BLOBS}}"
+fi
 
 cmake -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=/opt/cmake/toolchain-arm-10.3-2021.07.cmake \
