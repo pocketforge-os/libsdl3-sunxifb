@@ -566,7 +566,7 @@ static void quit(int rc)
     exit(rc);
 }
 
-/* Post-run hard exit (bead tsp-mc9m.41.935; revised per PR#18 review).
+/* Post-run hard exit (bead tsp-mc9m.41.935; revised per PR#18 review rounds 1-2).
  *
  * After the benchmark loop finishes and the summary is printed, the normal
  * quit() teardown path (SDL_GL_DestroyContext -> SDLTest_CommonQuit's
@@ -582,20 +582,24 @@ static void quit(int rc)
  * specific call (context destroy of a context that was still current, EGL
  * surface destroy, or the VT_ACTIVATE pair) is the one that blocks.
  *
- * Skip that GL/EGL/VT teardown -- but NOT unconditionally: SUNXIFB_VideoInit
- * disables the terminal cursor ("setterm -cursor off") and only
- * SUNXIFB_VideoQuit re-enables it, which normal teardown would reach only
- * AFTER the suspect GL/EGL/window path. Restore the cursor here, first and
- * directly (the same call SUNXIFB_VideoQuit makes -- cheap, and touches
- * neither GL/EGL nor the VT_ACTIVATE ioctls), so it always runs before the
- * hard exit regardless of what happens further down the normal teardown
- * chain. Use portable C99 _Exit() (stdlib.h, already included) rather than
- * POSIX _exit()/<unistd.h> so this test keeps building on non-POSIX
- * platforms; both skip atexit/SDL cleanup identically and cannot hang on
- * the GL/EGL/VT calls above. DUT-verify-pending: confirm on tsp-base that
- * `SDL_VIDEODRIVER=sunxifb pf-gfxbench` now returns (exit matching rc)
- * within a couple seconds of the pf_gfxbench_status line, AND that the
- * shell's cursor is back on afterward. */
+ * This workaround is sunxifb-SPECIFIC: only that driver's teardown is known
+ * to hang, so the caller gates this against SDL_GetCurrentVideoDriver() and
+ * only reaches here when sunxifb is active -- every other GLES2 backend
+ * (x11, wayland, kmsdrm, ...) keeps going through the normal quit() below,
+ * unaffected. Skip the GL/EGL/VT teardown -- but NOT unconditionally:
+ * SUNXIFB_VideoInit disables the terminal cursor ("setterm -cursor off")
+ * and only SUNXIFB_VideoQuit re-enables it, which normal teardown would
+ * reach only AFTER the suspect GL/EGL/window path. Restore the cursor here,
+ * first and directly (the same call SUNXIFB_VideoQuit makes -- cheap, and
+ * touches neither GL/EGL nor the VT_ACTIVATE ioctls), so it always runs
+ * before the hard exit regardless of what happens further down the normal
+ * teardown chain. Use portable C99 _Exit() (stdlib.h, already included)
+ * rather than POSIX _exit()/<unistd.h> so this test keeps building on
+ * non-POSIX platforms; both skip atexit/SDL cleanup identically and cannot
+ * hang on the GL/EGL/VT calls above. DUT-verify-pending: confirm on
+ * tsp-base that `SDL_VIDEODRIVER=sunxifb pf-gfxbench` now returns (exit
+ * matching rc) within a couple seconds of the pf_gfxbench_status line, AND
+ * that the shell's cursor is back on afterward. */
 static void quit_after_run(int rc)
 {
     fflush(stdout);
@@ -1005,7 +1009,17 @@ int main(int argc, char *argv[])
         }
     }
 
-    quit_after_run(exit_code);
+    /* The post-run teardown hang (see quit_after_run() above) is
+     * sunxifb-specific -- gate the workaround to that driver only, so every
+     * other GLES2 backend keeps its normal, full SDL/GL/EGL teardown. */
+    {
+        const char *driver = SDL_GetCurrentVideoDriver();
+        if (driver && SDL_strcmp(driver, "sunxifb") == 0) {
+            quit_after_run(exit_code);
+        } else {
+            quit(exit_code);
+        }
+    }
     return 0;
 }
 
