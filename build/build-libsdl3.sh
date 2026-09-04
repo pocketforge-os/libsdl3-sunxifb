@@ -37,22 +37,22 @@ SRC=${SRC:-/work/src/sdl3}
 BLOBS=${BLOBS:-/work/blobs/sunxi/a133/22.102.54.38}
 
 # GPU model discriminator (tsp-mc9m.41.924.6 / C3): "ddk" (closed PowerVR DDK) or
-# "open" (a133-open's Mesa GLES/EGL/GBM, Zink gallium) — no other value is valid, and
-# there is deliberately no default (see the fail-closed comment below). CheckSUNXIFB
+# "open" (a133-open's Mesa GLES/EGL/GBM, Zink gallium). CheckSUNXIFB
 # (sdl3/cmake/sdlchecks.cmake) only ever uses SUNXIFB_DDK_ROOT as a generic
 # CMAKE_FIND_ROOT_PATH entry to locate `include/EGL/egl.h` + `libEGL.so`/`libGLESv2.so`
 # — it is not DDK-specific despite the name, so pointing it at the open Mesa install
 # tree's prefix (which ships the same include/EGL + lib/libEGL.so shape) needs no
 # cmake change at all.
-# Fail CLOSED, not open (coordinator review finding on this PR): an UNKNOWN or EMPTY
-# PF_GPU_MODEL must be a loud error, never a silent fall-through to the DDK branch —
-# the same property B's PF_SOC validation enforces (platform/core/profile.py
-# validate() now requires [device].soc so a broken profile errors loudly rather than
-# resolving PF_SOC empty). Deliberately NO ":-ddk" default here (unlike this script's
-# other env vars): the caller (Dockerfile.pf's sdl stage) always resolves and passes
-# an explicit PF_GPU_MODEL, so requiring it here costs production nothing and closes
-# the silent-typo path a bare default would otherwise leave open.
-case "${PF_GPU_MODEL:-}" in
+# Fail CLOSED on an EXPLICITLY-set-but-unrecognized value, never on the DOCUMENTED
+# default (coordinator review, round 2 — the round-1 fix over-corrected: making a bare
+# UNSET PF_GPU_MODEL fatal broke this script's own documented canonical closed-DDK
+# invocation, which never sets the var and relies on the ddk default). So: unset/empty
+# → the documented "ddk" default (unchanged, pre-existing behavior); an EXPLICIT "open"
+# or "ddk" selects that model; any other EXPLICIT value (a typo like "opne") is a loud
+# FATAL — never a silent fall-through to DDK, which is what the round-1 finding
+# actually objected to. Mirrors B's PF_SOC fail-closed validation.
+PF_GPU_MODEL="${PF_GPU_MODEL:-ddk}"
+case "${PF_GPU_MODEL}" in
   open)
     DDK_ROOT="${SUNXIFB_MESA_ROOT:?SUNXIFB_MESA_ROOT must be set for PF_GPU_MODEL=open (the open Mesa install tree's prefix, e.g. .../usr/local — the C1 gpu-um-mesa stage's output)}"
     ;;
@@ -61,7 +61,7 @@ case "${PF_GPU_MODEL:-}" in
     DDK_ROOT="${SUNXIFB_DDK_ROOT:-${BLOBS}}"
     ;;
   *)
-    echo "FATAL: PF_GPU_MODEL must be 'ddk' or 'open', got '${PF_GPU_MODEL:-}' (unset/empty counts as invalid)" >&2
+    echo "FATAL: PF_GPU_MODEL must be 'ddk' or 'open', got '${PF_GPU_MODEL}' (an unset/empty value defaults to 'ddk' — this is an explicitly-set unrecognized value, likely a typo)" >&2
     exit 1
     ;;
 esac
