@@ -36,8 +36,35 @@ OUT=${OUT:-/work/out}
 SRC=${SRC:-/work/src/sdl3}
 BLOBS=${BLOBS:-/work/blobs/sunxi/a133/22.102.54.38}
 
-# Pin DDK root unless caller already set it (multi-BVNC futures want override).
-DDK_ROOT="${SUNXIFB_DDK_ROOT:-${BLOBS}}"
+# GPU model discriminator (tsp-mc9m.41.924.6 / C3): "ddk" (closed PowerVR DDK) or
+# "open" (a133-open's Mesa GLES/EGL/GBM, Zink gallium). CheckSUNXIFB
+# (sdl3/cmake/sdlchecks.cmake) only ever uses SUNXIFB_DDK_ROOT as a generic
+# CMAKE_FIND_ROOT_PATH entry to locate `include/EGL/egl.h` + `libEGL.so`/`libGLESv2.so`
+# — it is not DDK-specific despite the name, so pointing it at the open Mesa install
+# tree's prefix (which ships the same include/EGL + lib/libEGL.so shape) needs no
+# cmake change at all.
+# Fail CLOSED on an EXPLICITLY-set-but-unrecognized value, never on the DOCUMENTED
+# default (coordinator review, round 2 — the round-1 fix over-corrected: making a bare
+# UNSET PF_GPU_MODEL fatal broke this script's own documented canonical closed-DDK
+# invocation, which never sets the var and relies on the ddk default). So: unset/empty
+# → the documented "ddk" default (unchanged, pre-existing behavior); an EXPLICIT "open"
+# or "ddk" selects that model; any other EXPLICIT value (a typo like "opne") is a loud
+# FATAL — never a silent fall-through to DDK, which is what the round-1 finding
+# actually objected to. Mirrors B's PF_SOC fail-closed validation.
+PF_GPU_MODEL="${PF_GPU_MODEL:-ddk}"
+case "${PF_GPU_MODEL}" in
+  open)
+    DDK_ROOT="${SUNXIFB_MESA_ROOT:?SUNXIFB_MESA_ROOT must be set for PF_GPU_MODEL=open (the open Mesa install tree's prefix, e.g. .../usr/local — the C1 gpu-um-mesa stage's output)}"
+    ;;
+  ddk)
+    # Pin DDK root unless caller already set it (multi-BVNC futures want override).
+    DDK_ROOT="${SUNXIFB_DDK_ROOT:-${BLOBS}}"
+    ;;
+  *)
+    echo "FATAL: PF_GPU_MODEL must be 'ddk' or 'open', got '${PF_GPU_MODEL}' (an unset/empty value defaults to 'ddk' — this is an explicitly-set unrecognized value, likely a typo)" >&2
+    exit 1
+    ;;
+esac
 
 cmake -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=/opt/cmake/toolchain-arm-10.3-2021.07.cmake \
