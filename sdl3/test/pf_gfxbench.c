@@ -590,20 +590,31 @@ static void quit(int rc)
  * SUNXIFB_VideoInit disables the terminal cursor ("setterm -cursor off")
  * and only SUNXIFB_VideoQuit re-enables it, which normal teardown would
  * reach only AFTER the suspect GL/EGL/window path. Restore the cursor here,
- * first and directly (the same call SUNXIFB_VideoQuit makes -- cheap, and
- * touches neither GL/EGL nor the VT_ACTIVATE ioctls), so it always runs
- * before the hard exit regardless of what happens further down the normal
- * teardown chain. Use portable C99 _Exit() (stdlib.h, already included)
+ * first and directly (see below for the mechanism -- cheap, and touches
+ * neither GL/EGL nor the VT_ACTIVATE ioctls), so it always runs before the
+ * hard exit regardless of what happens further down the normal teardown
+ * chain. Use portable C99 _Exit() (stdlib.h, already included)
  * rather than POSIX _exit()/<unistd.h> so this test keeps building on
  * non-POSIX platforms; both skip atexit/SDL cleanup identically and cannot
- * hang on the GL/EGL/VT calls above. DUT-verify-pending: confirm on
- * tsp-base that `SDL_VIDEODRIVER=sunxifb pf-gfxbench` now returns (exit
- * matching rc) within a couple seconds of the pf_gfxbench_status line, AND
- * that the shell's cursor is back on afterward. */
+ * hang on the GL/EGL/VT calls above.
+ *
+ * The cursor restore itself must not reintroduce the very risk this whole
+ * path exists to avoid: system("setterm -cursor on") forks an unbounded
+ * synchronous subprocess, so a wedged/missing setterm could hang exactly
+ * where the guaranteed-return fix is supposed to prevent one. Write the
+ * DECTCEM "show cursor" escape sequence directly instead -- the same effect
+ * `setterm -cursor on` produces on the Linux console, but a bounded,
+ * no-fork/exec terminal write.
+ *
+ * DUT-verify-pending: confirm on tsp-base that `SDL_VIDEODRIVER=sunxifb
+ * pf-gfxbench` now returns (exit matching rc) within a couple seconds of
+ * the pf_gfxbench_status line, AND that the shell's cursor is back on
+ * afterward. */
 static void quit_after_run(int rc)
 {
     fflush(stdout);
-    system("setterm -cursor on");
+    fputs("\033[?25h", stdout); /* DECTCEM show cursor */
+    fflush(stdout);
     _Exit(rc);
 }
 
