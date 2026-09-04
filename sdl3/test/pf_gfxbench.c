@@ -69,6 +69,16 @@
 
 #include <SDL3/SDL_opengles2.h>
 
+/* POSIX-only, needed for the non-blocking /dev/tty cursor-restore write in
+ * quit_after_run() below (tsp-mc9m.41.935 round 6). Safe here: every
+ * platform this guard admits (iOS/Android/Emscripten/Linux) is POSIX-ish;
+ * the earlier build break was an UNCONDITIONAL top-level <unistd.h>
+ * include reached by non-POSIX platforms too (e.g. Windows/MSVC) -- this
+ * one is gated behind HAVE_OPENGLES2 like the rest of this file's
+ * GLES2/EGL implementation, so it never reaches those platforms. */
+#include <fcntl.h>
+#include <unistd.h>
+
 typedef struct GLES2_Context
 {
 #define SDL_PROC(ret, func, params) ret (APIENTRY *func) params;
@@ -610,9 +620,17 @@ static void quit(int rc)
  * summary, so writing the escape there would contaminate that output, and
  * on a redirected/captured run (exactly how this benchmark is normally
  * invoked) the escape would never reach the console at all, leaving the
- * cursor disabled regardless. Open /dev/tty directly for this one write;
- * fopen() failing (no controlling tty) is handled by simply skipping the
- * restore rather than treating it as fatal.
+ * cursor disabled regardless. Open /dev/tty directly for this one write.
+ *
+ * The write itself must not be able to block either -- a stdio FILE* write
+ * (fputs/fflush) can still stall if the tty's output buffer were ever full
+ * (flow-control-stopped), which is exactly the class of risk this whole
+ * path exists to close off. Use a raw non-blocking open+write instead
+ * (O_NONBLOCK + O_NOCTTY: don't wait for carrier, don't make this our
+ * controlling terminal): if the fd can't be opened or the write would
+ * block (EAGAIN), the cursor-restore is simply skipped -- it is
+ * best-effort, and the guaranteed prompt return is the actual
+ * requirement -- rather than risking any wait on it.
  *
  * DUT-verify-pending: confirm on tsp-base that `SDL_VIDEODRIVER=sunxifb
  * pf-gfxbench` now returns (exit matching rc) within a couple seconds of
@@ -621,15 +639,15 @@ static void quit(int rc)
  * on afterward. */
 static void quit_after_run(int rc)
 {
-    FILE *tty;
+    int fd;
 
     fflush(stdout);
 
-    tty = fopen("/dev/tty", "w");
-    if (tty) {
-        fputs("\033[?25h", tty); /* DECTCEM show cursor */
-        fflush(tty);
-        fclose(tty);
+    fd = open("/dev/tty", O_WRONLY | O_NONBLOCK | O_NOCTTY);
+    if (fd >= 0) {
+        static const char show_cursor[] = "\033[?25h"; /* DECTCEM */
+        (void)write(fd, show_cursor, sizeof(show_cursor) - 1);
+        close(fd);
     }
     _Exit(rc);
 }
