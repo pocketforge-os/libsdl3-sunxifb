@@ -60,7 +60,6 @@
 
 #include <stdlib.h>
 #include <stdio.h>
-#include <unistd.h>
 
 #if defined(SDL_PLATFORM_IOS) || defined(SDL_PLATFORM_ANDROID) || defined(SDL_PLATFORM_EMSCRIPTEN) || defined(SDL_PLATFORM_LINUX)
 #define HAVE_OPENGLES2
@@ -567,29 +566,41 @@ static void quit(int rc)
     exit(rc);
 }
 
-/* Post-run hard exit (bead tsp-mc9m.41.935): after the benchmark loop
- * finishes and the summary is printed, the normal quit() teardown path
- * (SDL_GL_DestroyContext -> SDLTest_CommonQuit's SDL_DestroyWindow, which
- * unbinds the GL context via SDL_GL_MakeCurrent(window, NULL) since it was
- * never explicitly unbound while current -> SDL_Quit -> SUNXIFB_VideoQuit's
- * VT_ACTIVATE ioctls) was observed to hang indefinitely on tsp-base's GE8300
- * sunxifb/NULL_WSEGL path: the process never returns to the shell and needs
- * the harness's 35s outer timeout to SIGKILL it, even though the summary
- * had already printed at 30s. The benchmark result is fully valid at that
- * point (every summary field was flushed to stdout already); only the
- * subsequent EGL/VT teardown is suspect, and there is no DUT available here
- * to bisect which specific call (context destroy of a context that was
- * still current, EGL surface destroy, or the VT_ACTIVATE pair) is the one
- * that blocks. Skip that teardown entirely: the process is exiting right
- * now regardless, so the kernel reclaims the GL context, window, and any
- * open fds on its own; _exit() runs no atexit/SDL cleanup and therefore
- * cannot hang on any of them. DUT-verify-pending: confirm on tsp-base that
+/* Post-run hard exit (bead tsp-mc9m.41.935; revised per PR#18 review).
+ *
+ * After the benchmark loop finishes and the summary is printed, the normal
+ * quit() teardown path (SDL_GL_DestroyContext -> SDLTest_CommonQuit's
+ * SDL_DestroyWindow, which unbinds the GL context via
+ * SDL_GL_MakeCurrent(window, NULL) since it was never explicitly unbound
+ * while current -> SDL_Quit -> SUNXIFB_VideoQuit's VT_ACTIVATE ioctls) was
+ * observed to hang indefinitely on tsp-base's GE8300 sunxifb/NULL_WSEGL
+ * path: the process never returns to the shell and needs the harness's 35s
+ * outer timeout to SIGKILL it, even though the summary had already printed
+ * at 30s. The benchmark result is fully valid at that point (every summary
+ * field was flushed to stdout already); only the subsequent GL/EGL/VT
+ * teardown is suspect, and there is no DUT available here to bisect which
+ * specific call (context destroy of a context that was still current, EGL
+ * surface destroy, or the VT_ACTIVATE pair) is the one that blocks.
+ *
+ * Skip that GL/EGL/VT teardown -- but NOT unconditionally: SUNXIFB_VideoInit
+ * disables the terminal cursor ("setterm -cursor off") and only
+ * SUNXIFB_VideoQuit re-enables it, which normal teardown would reach only
+ * AFTER the suspect GL/EGL/window path. Restore the cursor here, first and
+ * directly (the same call SUNXIFB_VideoQuit makes -- cheap, and touches
+ * neither GL/EGL nor the VT_ACTIVATE ioctls), so it always runs before the
+ * hard exit regardless of what happens further down the normal teardown
+ * chain. Use portable C99 _Exit() (stdlib.h, already included) rather than
+ * POSIX _exit()/<unistd.h> so this test keeps building on non-POSIX
+ * platforms; both skip atexit/SDL cleanup identically and cannot hang on
+ * the GL/EGL/VT calls above. DUT-verify-pending: confirm on tsp-base that
  * `SDL_VIDEODRIVER=sunxifb pf-gfxbench` now returns (exit matching rc)
- * within a couple seconds of the pf_gfxbench_status line. */
+ * within a couple seconds of the pf_gfxbench_status line, AND that the
+ * shell's cursor is back on afterward. */
 static void quit_after_run(int rc)
 {
     fflush(stdout);
-    _exit(rc);
+    system("setterm -cursor on");
+    _Exit(rc);
 }
 
 /* --- main --------------------------------------------------------------------------- */
