@@ -604,17 +604,33 @@ static void quit(int rc)
  * where the guaranteed-return fix is supposed to prevent one. Write the
  * DECTCEM "show cursor" escape sequence directly instead -- the same effect
  * `setterm -cursor on` produces on the Linux console, but a bounded,
- * no-fork/exec terminal write.
+ * no-fork/exec terminal write. And it must go to the same place setterm
+ * wrote it: the CONTROLLING TERMINAL, not stdout -- stdout is the
+ * machine-readable channel the harness parses for pf_gfxbench_status=/the
+ * summary, so writing the escape there would contaminate that output, and
+ * on a redirected/captured run (exactly how this benchmark is normally
+ * invoked) the escape would never reach the console at all, leaving the
+ * cursor disabled regardless. Open /dev/tty directly for this one write;
+ * fopen() failing (no controlling tty) is handled by simply skipping the
+ * restore rather than treating it as fatal.
  *
  * DUT-verify-pending: confirm on tsp-base that `SDL_VIDEODRIVER=sunxifb
  * pf-gfxbench` now returns (exit matching rc) within a couple seconds of
- * the pf_gfxbench_status line, AND that the shell's cursor is back on
- * afterward. */
+ * the pf_gfxbench_status line, that stdout still carries only the machine
+ * contract (no stray escape bytes), and that the console's cursor is back
+ * on afterward. */
 static void quit_after_run(int rc)
 {
+    FILE *tty;
+
     fflush(stdout);
-    fputs("\033[?25h", stdout); /* DECTCEM show cursor */
-    fflush(stdout);
+
+    tty = fopen("/dev/tty", "w");
+    if (tty) {
+        fputs("\033[?25h", tty); /* DECTCEM show cursor */
+        fflush(tty);
+        fclose(tty);
+    }
     _Exit(rc);
 }
 
