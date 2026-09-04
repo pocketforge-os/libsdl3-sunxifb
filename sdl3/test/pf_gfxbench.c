@@ -69,6 +69,16 @@
 
 #include <SDL3/SDL_opengles2.h>
 
+/* POSIX-only, needed for the non-blocking /dev/tty cursor-restore write in
+ * quit_after_run() below (tsp-mc9m.41.935 round 6). Safe here: every
+ * platform this guard admits (iOS/Android/Emscripten/Linux) is POSIX-ish;
+ * the earlier build break was an UNCONDITIONAL top-level <unistd.h>
+ * include reached by non-POSIX platforms too (e.g. Windows/MSVC) -- this
+ * one is gated behind HAVE_OPENGLES2 like the rest of this file's
+ * GLES2/EGL implementation, so it never reaches those platforms. */
+#include <fcntl.h>
+#include <unistd.h>
+
 typedef struct GLES2_Context
 {
 #define SDL_PROC(ret, func, params) ret (APIENTRY *func) params;
@@ -566,6 +576,82 @@ static void quit(int rc)
     exit(rc);
 }
 
+/* Post-run hard exit (bead tsp-mc9m.41.935; revised per PR#18 review rounds 1-2).
+ *
+ * After the benchmark loop finishes and the summary is printed, the normal
+ * quit() teardown path (SDL_GL_DestroyContext -> SDLTest_CommonQuit's
+ * SDL_DestroyWindow, which unbinds the GL context via
+ * SDL_GL_MakeCurrent(window, NULL) since it was never explicitly unbound
+ * while current -> SDL_Quit -> SUNXIFB_VideoQuit's VT_ACTIVATE ioctls) was
+ * observed to hang indefinitely on tsp-base's GE8300 sunxifb/NULL_WSEGL
+ * path: the process never returns to the shell and needs the harness's 35s
+ * outer timeout to SIGKILL it, even though the summary had already printed
+ * at 30s. The benchmark result is fully valid at that point (every summary
+ * field was flushed to stdout already); only the subsequent GL/EGL/VT
+ * teardown is suspect, and there is no DUT available here to bisect which
+ * specific call (context destroy of a context that was still current, EGL
+ * surface destroy, or the VT_ACTIVATE pair) is the one that blocks.
+ *
+ * This workaround is sunxifb-SPECIFIC: only that driver's teardown is known
+ * to hang, so the caller gates this against SDL_GetCurrentVideoDriver() and
+ * only reaches here when sunxifb is active -- every other GLES2 backend
+ * (x11, wayland, kmsdrm, ...) keeps going through the normal quit() below,
+ * unaffected. Skip the GL/EGL/VT teardown -- but NOT unconditionally:
+ * SUNXIFB_VideoInit disables the terminal cursor ("setterm -cursor off")
+ * and only SUNXIFB_VideoQuit re-enables it, which normal teardown would
+ * reach only AFTER the suspect GL/EGL/window path. Restore the cursor here,
+ * first and directly (see below for the mechanism -- cheap, and touches
+ * neither GL/EGL nor the VT_ACTIVATE ioctls), so it always runs before the
+ * hard exit regardless of what happens further down the normal teardown
+ * chain. Use portable C99 _Exit() (stdlib.h, already included)
+ * rather than POSIX _exit()/<unistd.h> so this test keeps building on
+ * non-POSIX platforms; both skip atexit/SDL cleanup identically and cannot
+ * hang on the GL/EGL/VT calls above.
+ *
+ * The cursor restore itself must not reintroduce the very risk this whole
+ * path exists to avoid: system("setterm -cursor on") forks an unbounded
+ * synchronous subprocess, so a wedged/missing setterm could hang exactly
+ * where the guaranteed-return fix is supposed to prevent one. Write the
+ * DECTCEM "show cursor" escape sequence directly instead -- the same effect
+ * `setterm -cursor on` produces on the Linux console, but a bounded,
+ * no-fork/exec terminal write. And it must go to the same place setterm
+ * wrote it: the CONTROLLING TERMINAL, not stdout -- stdout is the
+ * machine-readable channel the harness parses for pf_gfxbench_status=/the
+ * summary, so writing the escape there would contaminate that output, and
+ * on a redirected/captured run (exactly how this benchmark is normally
+ * invoked) the escape would never reach the console at all, leaving the
+ * cursor disabled regardless. Open /dev/tty directly for this one write.
+ *
+ * The write itself must not be able to block either -- a stdio FILE* write
+ * (fputs/fflush) can still stall if the tty's output buffer were ever full
+ * (flow-control-stopped), which is exactly the class of risk this whole
+ * path exists to close off. Use a raw non-blocking open+write instead
+ * (O_NONBLOCK + O_NOCTTY: don't wait for carrier, don't make this our
+ * controlling terminal): if the fd can't be opened or the write would
+ * block (EAGAIN), the cursor-restore is simply skipped -- it is
+ * best-effort, and the guaranteed prompt return is the actual
+ * requirement -- rather than risking any wait on it.
+ *
+ * DUT-verify-pending: confirm on tsp-base that `SDL_VIDEODRIVER=sunxifb
+ * pf-gfxbench` now returns (exit matching rc) within a couple seconds of
+ * the pf_gfxbench_status line, that stdout still carries only the machine
+ * contract (no stray escape bytes), and that the console's cursor is back
+ * on afterward. */
+static void quit_after_run(int rc)
+{
+    int fd;
+
+    fflush(stdout);
+
+    fd = open("/dev/tty", O_WRONLY | O_NONBLOCK | O_NOCTTY);
+    if (fd >= 0) {
+        static const char show_cursor[] = "\033[?25h"; /* DECTCEM */
+        (void)write(fd, show_cursor, sizeof(show_cursor) - 1);
+        close(fd);
+    }
+    _Exit(rc);
+}
+
 /* --- main --------------------------------------------------------------------------- */
 
 int main(int argc, char *argv[])
@@ -968,7 +1054,17 @@ int main(int argc, char *argv[])
         }
     }
 
-    quit(exit_code);
+    /* The post-run teardown hang (see quit_after_run() above) is
+     * sunxifb-specific -- gate the workaround to that driver only, so every
+     * other GLES2 backend keeps its normal, full SDL/GL/EGL teardown. */
+    {
+        const char *driver = SDL_GetCurrentVideoDriver();
+        if (driver && SDL_strcmp(driver, "sunxifb") == 0) {
+            quit_after_run(exit_code);
+        } else {
+            quit(exit_code);
+        }
+    }
     return 0;
 }
 
