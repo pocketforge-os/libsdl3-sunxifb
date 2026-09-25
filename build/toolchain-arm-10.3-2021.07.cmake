@@ -40,6 +40,14 @@ set(CMAKE_SYSROOT ${TOOLCHAIN_PATH}/${TOOLCHAIN_TRIPLET}/libc)
 # multi-element-ready here means no toolchain-file edits later.
 set(CMAKE_FIND_ROOT_PATH ${CMAKE_SYSROOT})
 
+# The canonical SDL build passes its selected EGL/GLES prefix as
+# SUNXIFB_DDK_ROOT for both the closed DDK and open Mesa models. Make that root
+# visible before SDL's CheckEGL/CheckKMSDRM probes run; CheckSUNXIFB appends the
+# same root later, which is too late for KMSDRM's EGL prerequisite.
+if(DEFINED SUNXIFB_DDK_ROOT AND NOT SUNXIFB_DDK_ROOT STREQUAL "")
+  list(APPEND CMAKE_FIND_ROOT_PATH "${SUNXIFB_DDK_ROOT}")
+endif()
+
 # Find host programs (gcc, etc.) on the host PATH; find libs/headers/packages
 # only inside the sysroot (and any later-appended roots like /work/blobs).
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
