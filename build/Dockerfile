@@ -115,7 +115,7 @@ ARG TOOLCHAIN_TRIPLET=aarch64-none-linux-gnu
 #   Scripting glue:       python3
 #   SDL3 cross-deps (arm64): libasound2-dev (ALSA), libudev-dev (input), libdbus-1-dev (IPC),
 #                            libibus-1.0-dev (text input — pulled by SDL_DIALOG=ON), libpulse-dev,
-#                            libdecor-0-dev, libdrm-dev. All multiarch-prefixed `:arm64` so
+#                            libdecor-0-dev, libdrm-dev, libgbm-dev. All multiarch-prefixed `:arm64` so
 #                            cross-build pkg-config / find_package picks up the aarch64 variant.
 #                            We add the arm64 architecture and a minimal sources.list with the
 #                            arm64 repo before installing.
@@ -160,6 +160,7 @@ RUN dpkg --add-architecture arm64 \
         libudev-dev:arm64 \
         libdbus-1-dev:arm64 \
         libdrm-dev:arm64 \
+        libgbm-dev:arm64 \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
@@ -184,15 +185,16 @@ RUN set -eux; \
         'libpulse*' \
         'libudev*' \
         'libdbus-1*' \
-        'libdrm*' ; do \
+        'libdrm*' \
+        'libgbm*' ; do \
         find "${SRC_LIB}" -maxdepth 1 -name "${pat}" -exec cp -a {} "${DST_LIB}/" \; ; \
     done; \
     # Pkg-config: copy files, rewrite multiarch lib paths to sysroot-relative.
     if [ -d "${SRC_LIB}/pkgconfig" ]; then \
-        for pc in alsa libpulse libpulse-simple libudev dbus-1 libdrm libkms; do \
+        for pc in alsa libpulse libpulse-simple libudev dbus-1 libdrm libkms gbm; do \
             f="${SRC_LIB}/pkgconfig/${pc}.pc"; \
             [ -f "$f" ] || continue; \
-            sed 's|/usr/lib/aarch64-linux-gnu|${prefix}/lib|g; s|/usr/include|${prefix}/include|g; s|^prefix=.*|prefix='"${CROSS_SYSROOT}"'/usr|' \
+            sed 's|/usr/lib/aarch64-linux-gnu|${prefix}/lib|g; s|${prefix}/lib/aarch64-linux-gnu|${prefix}/lib|g; s|/usr/include|${prefix}/include|g; s|^prefix=.*|prefix='"${CROSS_SYSROOT}"'/usr|' \
                 "$f" > "${PKG_DST}/${pc}.pc"; \
         done; \
     fi; \
@@ -205,12 +207,22 @@ RUN set -eux; \
         mkdir -p "${DST_INC}/dbus-1.0/dbus"; \
         cp -a "${SRC_LIB}/dbus-1.0/include/dbus/." "${DST_INC}/dbus-1.0/dbus/"; \
     fi; \
-    for h in libudev.h alsa-symbols.h alsa-version.h; do \
+    for h in libudev.h alsa-symbols.h alsa-version.h gbm.h xf86drm.h xf86drmMode.h; do \
         if [ -f "${SRC_INC}/${h}" ]; then cp -a "${SRC_INC}/${h}" "${DST_INC}/"; fi; \
     done; \
-    # Verify: the toolchain's pkg-config needs to find alsa via PKG_CONFIG_LIBDIR=sysroot/usr/lib/pkgconfig
-    PKG_CONFIG_LIBDIR=${PKG_DST} pkg-config --exists alsa; \
-    echo "Cross sysroot now has: $(ls ${DST_LIB}/libasound* ${DST_LIB}/libpulse* ${DST_LIB}/libudev* | wc -l) lib files"
+    # Verify target-only metadata. PKG_CONFIG_LIBDIR suppresses host defaults;
+    # rewritten paths must point back into the ARM64 sysroot.
+    PKG_CONFIG_LIBDIR=${PKG_DST} pkg-config --exists alsa libdrm gbm; \
+    for pc in libdrm gbm; do \
+        test "$(PKG_CONFIG_LIBDIR=${PKG_DST} pkg-config --variable=pcfiledir ${pc})" = "${PKG_DST}"; \
+        test "$(PKG_CONFIG_LIBDIR=${PKG_DST} pkg-config --variable=libdir ${pc})" = "${DST_LIB}"; \
+        test "$(PKG_CONFIG_LIBDIR=${PKG_DST} pkg-config --variable=includedir ${pc})" = "${DST_INC}"; \
+    done; \
+    test -f "${DST_INC}/gbm.h"; \
+    test -f "${DST_INC}/xf86drm.h"; \
+    test -f "${DST_INC}/xf86drmMode.h"; \
+    test -e "${DST_LIB}/libgbm.so"; \
+    echo "Cross sysroot now has: $(ls ${DST_LIB}/libasound* ${DST_LIB}/libpulse* ${DST_LIB}/libudev* ${DST_LIB}/libdrm* ${DST_LIB}/libgbm* | wc -l) lib files"
 
 # Pull the unpacked toolchain across from stage 1.
 COPY --from=toolchain-fetch /opt/arm-${TOOLCHAIN_VERSION} /opt/arm-${TOOLCHAIN_VERSION}

@@ -62,10 +62,11 @@ Shipped at `/opt/cmake/toolchain-arm-10.3-2021.07.cmake`. Symlink convenience
 path at `/opt/cmake/toolchain.cmake`. Pass it via `-DCMAKE_TOOLCHAIN_FILE=`.
 
 Sysroot is `/opt/arm-10.3-2021.07/aarch64-none-linux-gnu/libc`. It has glibc
-2.33 + drm headers + pthread.h, but **no EGL/GLES2** — those live in the
-PowerVR DDK and bind-mount in via `/work/blobs`. Downstream CMake should
-append `/work/blobs/path/to/ddk-includes` to `CMAKE_FIND_ROOT_PATH`; the
-toolchain file is structured so that this is purely additive.
+2.33 plus the target ARM64 SDL dependencies, including libdrm and GBM headers,
+libraries, and rewritten pkg-config metadata. EGL/GLES2 come from the selected
+graphics prefix: the PowerVR DDK under `/work/blobs` for `PF_GPU_MODEL=ddk`, or
+the caller-provided `SUNXIFB_MESA_ROOT` for `PF_GPU_MODEL=open`. The toolchain
+adds that selected prefix to `CMAKE_FIND_ROOT_PATH` before SDL probes EGL.
 
 The triplet is `aarch64-none-linux-gnu` (note the `-none-`, not the Linux
 convention `-linux-`). SDL3's CMake doesn't care about the triplet; do NOT
@@ -74,11 +75,24 @@ manufacture short-name symlinks — the toolchain has zero by design.
 ## Verify a built artifact
 
 The canonical `build/build-libsdl3.sh` recipe disables both SDL pkg-config
-RPATH handling and CMake build/install RPATH generation. The shipped
-`libSDL3-pocketforge.so.0` must have neither `DT_RPATH` nor `DT_RUNPATH`: a
-host build path is not a valid runtime dependency, and a trailing empty
-loader-path component would search the current working directory. Artifact
-verification fails closed if either dynamic tag is present.
+RPATH handling and CMake build/install RPATH generation. It enables dynamic
+KMSDRM only for `PF_GPU_MODEL=open`; the default/closed build keeps KMSDRM off
+and retains sunxifb. Open configuration also restricts pkg-config to the target
+sysroot and requires target libdrm and GBM metadata before CMake runs. Reusing
+the same `/work/out` across GPU models is supported: the recipe fingerprints
+`PF_GPU_MODEL` and the selected EGL/GLES root and clears CMake's discovery
+cache when either changes, while preserving the published artifact paths.
+
+The shipped `libSDL3-pocketforge.so.0` must have neither `DT_RPATH` nor
+`DT_RUNPATH`: a host build path is not a valid runtime dependency, and a
+trailing empty loader-path component would search the current working
+directory. Artifact verification fails closed if either dynamic tag is
+present, if EGL/GLES dependencies are absent, or if the compiled backend set
+does not match the selected GPU model. For open artifacts, exact embedded
+`kmsdrm`, `sunxifb`, `libdrm.so.2`, and `libgbm.so.1` strings plus the absence
+of direct `DT_NEEDED` entries for libdrm/libgbm are compiled evidence that the
+dynamic KMSDRM backend was included; CMake flags alone are not accepted as
+artifact evidence.
 
 The source-level contract for this policy can be checked without the cross
 toolchain or proprietary DDK input:

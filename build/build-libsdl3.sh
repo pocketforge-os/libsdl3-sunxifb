@@ -13,9 +13,9 @@
 # recipe is the corrected baseline.
 #
 # Subsystems explicitly OFF: video backends our BSP can't drive (X11, Wayland,
-# KMSDRM with no connectors, Vivante, RPi), Vulkan (no PowerVR Vulkan ICD),
-# OpenGL (we use OpenGL ES through PowerVR), Camera/Tray (not needed), Static
-# library (we ship shared only).
+# Vivante, RPi), Vulkan (no PowerVR Vulkan ICD), OpenGL (we use OpenGL ES),
+# Camera/Tray (not needed), Static library (we ship shared only). KMSDRM is
+# enabled only for the open Mesa model and remains disabled for the closed DDK.
 #
 # Run inside pocketforge/cross-build:10.3-2021.07-bookworm with:
 #   /work/src   <- libsdl3-sunxifb source tree (read-only)
@@ -35,6 +35,10 @@ set -eu
 OUT=${OUT:-/work/out}
 SRC=${SRC:-/work/src/sdl3}
 BLOBS=${BLOBS:-/work/blobs/sunxi/a133/22.102.54.38}
+TARGET_SYSROOT=/opt/arm-10.3-2021.07/aarch64-none-linux-gnu/libc
+TARGET_PKG_CONFIG_LIBDIR=${TARGET_SYSROOT}/usr/lib/pkgconfig
+TARGET_LIBDIR=${TARGET_SYSROOT}/usr/lib
+TARGET_INCLUDEDIR=${TARGET_SYSROOT}/usr/include
 
 # GPU model discriminator (tsp-mc9m.41.924.6 / C3): "ddk" (closed PowerVR DDK) or
 # "open" (a133-open's Mesa GLES/EGL/GBM, Zink gallium). CheckSUNXIFB
@@ -54,17 +58,74 @@ BLOBS=${BLOBS:-/work/blobs/sunxi/a133/22.102.54.38}
 PF_GPU_MODEL="${PF_GPU_MODEL:-ddk}"
 case "${PF_GPU_MODEL}" in
   open)
-    DDK_ROOT="${SUNXIFB_MESA_ROOT:?SUNXIFB_MESA_ROOT must be set for PF_GPU_MODEL=open (the open Mesa install tree's prefix, e.g. .../usr/local — the C1 gpu-um-mesa stage's output)}"
+    DDK_ROOT="${SUNXIFB_MESA_ROOT:?SUNXIFB_MESA_ROOT must be set for PF_GPU_MODEL=open (the open Mesa install tree prefix, e.g. .../usr/local — the C1 gpu-um-mesa stage output)}"
+    SDL_KMSDRM=ON
     ;;
   ddk)
     # Pin DDK root unless caller already set it (multi-BVNC futures want override).
     DDK_ROOT="${SUNXIFB_DDK_ROOT:-${BLOBS}}"
+    SDL_KMSDRM=OFF
     ;;
   *)
     echo "FATAL: PF_GPU_MODEL must be 'ddk' or 'open', got '${PF_GPU_MODEL}' (an unset/empty value defaults to 'ddk' — this is an explicitly-set unrecognized value, likely a typo)" >&2
     exit 1
     ;;
 esac
+export PF_GPU_MODEL
+
+# Never let CMake's host pkg-config defaults satisfy cross dependencies. The
+# standalone container rewrites target .pc prefixes into this directory. For
+# the open model, fail before configuration unless both KMSDRM dependencies are
+# present and every path advertised by their metadata remains inside the ARM64
+# sysroot.
+export PKG_CONFIG_LIBDIR=${TARGET_PKG_CONFIG_LIBDIR}
+unset PKG_CONFIG_PATH
+
+require_target_pkg_config() {
+  module=$1
+  if ! pkg-config --exists "${module}"; then
+    echo "FATAL: target pkg-config module '${module}' is required for PF_GPU_MODEL=open (${TARGET_PKG_CONFIG_LIBDIR})" >&2
+    exit 1
+  fi
+
+  pcfiledir=$(pkg-config --variable=pcfiledir "${module}")
+  libdir=$(pkg-config --variable=libdir "${module}")
+  includedir=$(pkg-config --variable=includedir "${module}")
+  if [ "${pcfiledir}" != "${TARGET_PKG_CONFIG_LIBDIR}" ]; then
+    echo "FATAL: target pkg-config module '${module}' resolved metadata outside the ARM64 sysroot: ${pcfiledir}" >&2
+    exit 1
+  fi
+  if [ "${libdir}" != "${TARGET_LIBDIR}" ]; then
+    echo "FATAL: target pkg-config module '${module}' resolved the wrong target libdir: ${libdir}" >&2
+    exit 1
+  fi
+  if [ "${includedir}" != "${TARGET_INCLUDEDIR}" ]; then
+    echo "FATAL: target pkg-config module '${module}' resolved the wrong target includedir: ${includedir}" >&2
+    exit 1
+  fi
+}
+
+if [ "${PF_GPU_MODEL}" = open ]; then
+  require_target_pkg_config libdrm
+  require_target_pkg_config gbm
+fi
+
+# CMake caches graphics-library discovery by variable name, while OUT is the
+# public artifact directory and is intentionally reusable. Invalidate only the
+# CMake discovery cache when the selected model or graphics prefix changes so a
+# closed-to-open (or open-to-closed) rebuild cannot retain the other model's
+# EGL/GLES paths. An unstamped pre-policy build directory is treated as stale.
+mkdir -p "${OUT}"
+GRAPHICS_CONFIG_STAMP=${OUT}/.pocketforge-sdl-graphics-config
+GRAPHICS_CONFIG_CURRENT=${GRAPHICS_CONFIG_STAMP}.current
+printf 'PF_GPU_MODEL=%s\nSUNXIFB_DDK_ROOT=%s\n' \
+  "${PF_GPU_MODEL}" "${DDK_ROOT}" >"${GRAPHICS_CONFIG_CURRENT}"
+if [ ! -f "${GRAPHICS_CONFIG_STAMP}" ] || \
+    ! cmp -s "${GRAPHICS_CONFIG_CURRENT}" "${GRAPHICS_CONFIG_STAMP}"; then
+  rm -f "${OUT}/CMakeCache.txt"
+  rm -rf "${OUT}/CMakeFiles"
+fi
+mv "${GRAPHICS_CONFIG_CURRENT}" "${GRAPHICS_CONFIG_STAMP}"
 
 cmake -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=/opt/cmake/toolchain-arm-10.3-2021.07.cmake \
@@ -73,7 +134,8 @@ cmake -G Ninja \
   -DSUNXIFB_DDK_ROOT="${DDK_ROOT}" \
   \
   -DSDL_SUNXIFB=ON \
-  -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=OFF \
+  -DSDL_X11=OFF -DSDL_WAYLAND=OFF \
+  -DSDL_KMSDRM="${SDL_KMSDRM}" -DSDL_KMSDRM_SHARED=ON \
   -DSDL_VIVANTE=OFF -DSDL_RPI=OFF -DSDL_OFFSCREEN=OFF \
   -DSDL_DUMMYVIDEO=ON \
   \
