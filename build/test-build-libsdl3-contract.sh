@@ -25,6 +25,8 @@ require_literal "${SCRIPT}" '-DCMAKE_SKIP_RPATH=ON'
 require_literal "${SCRIPT}" '-DSDL_KMSDRM="${SDL_KMSDRM}"'
 require_literal "${SCRIPT}" '-DSDL_KMSDRM_SHARED=ON'
 require_literal "${SCRIPT}" 'require_target_pkg_config gbm'
+require_literal "${SCRIPT}" 'GRAPHICS_CONFIG_STAMP=${OUT}/.pocketforge-sdl-graphics-config'
+require_literal "${SCRIPT}" 'rm -f "${OUT}/CMakeCache.txt"'
 require_literal "${SCRIPT}" 'verify-libsdl3-artifact.sh'
 require_literal "${DOCKERFILE}" 'libgbm-dev:arm64'
 require_literal "${DOCKERFILE}" "'libgbm*'"
@@ -116,6 +118,44 @@ if run_verify ddk "${TMP}/readelf-no-egl" "${TMP}/nm-ok" "${TMP}/strings-ddk" "$
 fi
 grep -Fq 'FATAL: SDL artifact is missing required dependency libEGL.so.1' "${TMP}/err"
 
+# Build a real ELF negative control whose dynamic table directly links every
+# graphics dependency while its exported symbol and strings otherwise resemble
+# an acceptable open artifact. This must fail specifically on libdrm/libgbm
+# DT_NEEDED rather than on a mocked readelf response.
+HOST_CC=${CC:-cc}
+for tool in "${HOST_CC}" readelf nm strings; do
+  if ! command -v "${tool}" >/dev/null 2>&1; then
+    echo "FAIL: real direct-link ELF control requires ${tool}"
+    exit 1
+  fi
+done
+printf '%s\n' 'void fixture_dependency(void) {}' >"${TMP}/dependency.c"
+for soname in libEGL.so.1 libGLESv2.so.2 libdrm.so.2 libgbm.so.1; do
+  "${HOST_CC}" -shared -fPIC -Wl,-soname,"${soname}" \
+    -o "${TMP}/${soname}" "${TMP}/dependency.c"
+done
+ln -s libEGL.so.1 "${TMP}/libEGL.so"
+ln -s libGLESv2.so.2 "${TMP}/libGLESv2.so"
+ln -s libdrm.so.2 "${TMP}/libdrm.so"
+ln -s libgbm.so.1 "${TMP}/libgbm.so"
+printf '%s\n' \
+  'void SDL_DYNAPI_entry(void) {}' \
+  'const char backend_sunxifb[] = "sunxifb";' \
+  'const char backend_kmsdrm[] = "kmsdrm";' \
+  'const char dynamic_libdrm[] = "libdrm.so.2";' \
+  'const char dynamic_libgbm[] = "libgbm.so.1";' \
+  >"${TMP}/direct-kms.c"
+"${HOST_CC}" -shared -fPIC -Wl,--no-as-needed -L"${TMP}" \
+  -o "${TMP}/direct-kms.so" "${TMP}/direct-kms.c" \
+  -lEGL -lGLESv2 -ldrm -lgbm
+if PF_GPU_MODEL=open READELF=readelf NM=nm STRINGS=strings \
+    SYMVER_CHECK=${TMP}/symver-ok "${VERIFY}" "${TMP}/direct-kms.so" \
+    >"${TMP}/out" 2>"${TMP}/err"; then
+  echo "FAIL: open verification accepted directly linked KMSDRM dependencies"
+  exit 1
+fi
+grep -Fq 'FATAL: open SDL artifact links libdrm.so directly instead of using dynamic KMSDRM loading' "${TMP}/err"
+
 run_verify ddk "${TMP}/readelf-ok" "${TMP}/nm-ok" "${TMP}/strings-ddk" "${TMP}/symver-ok" \
   >"${TMP}/out" 2>"${TMP}/err"
 grep -Fq 'sunxifb' "${TMP}/out"
@@ -168,6 +208,18 @@ make_stub cmake \
   '  mkdir -p "${OUT}"' \
   '  : >"${OUT}/libSDL3-pocketforge.so.0.5.0"' \
   'else' \
+  '  selected_root=' \
+  '  for arg do' \
+  '    case "${arg}" in -DSUNXIFB_DDK_ROOT=*) selected_root=${arg#*=} ;; esac' \
+  '  done' \
+  '  cached_root=' \
+  '  if [ -f "${OUT}/CMakeCache.txt" ]; then IFS= read -r cached_root <"${OUT}/CMakeCache.txt" || true; fi' \
+  '  if [ -n "${cached_root}" ] && [ "${cached_root}" != "${selected_root}" ]; then' \
+  '    echo "FATAL: controlled CMake reused stale graphics root ${cached_root}" >&2' \
+  '    exit 86' \
+  '  fi' \
+  '  printf "%s\\n" "${selected_root}" >"${OUT}/CMakeCache.txt"' \
+  '  mkdir -p "${OUT}/CMakeFiles"' \
   '  printf "%s\\n" "$*" >>"${CMAKE_LOG}"' \
   'fi'
 make_stub nproc 'echo 2'
@@ -205,8 +257,10 @@ run_build() {
   artifact_kind=$2
   pkg_mode=$3
   name=${model}-${artifact_kind}-${pkg_mode}
-  out=${TMP}/out-${name}
-  log=${TMP}/cmake-${name}.log
+  out=${4:-${TMP}/out-${name}}
+  log=${5:-${TMP}/cmake-${name}.log}
+  mesa_root=${6:-${TMP}/mesa}
+  blobs_root=${7:-${TMP}/blobs}
   mkdir -p "${out}"
   : >"${log}"
   PATH=${TMP}:${PATH} \
@@ -219,9 +273,9 @@ run_build() {
     SYMVER_CHECK=${TMP}/symver-ok \
     OUT=${out} \
     SRC=${TMP}/source \
-    BLOBS=${TMP}/blobs \
+    BLOBS=${blobs_root} \
     PF_GPU_MODEL=${model} \
-    SUNXIFB_MESA_ROOT=${TMP}/mesa \
+    SUNXIFB_MESA_ROOT=${mesa_root} \
     "${SCRIPT}"
 }
 
@@ -234,6 +288,28 @@ grep -Fq 'sunxifb' "${TMP}/build-out"
 run_build ddk ddk target >"${TMP}/build-out" 2>"${TMP}/build-err"
 grep -Fq -- '-DSDL_KMSDRM=OFF' "${TMP}/cmake-ddk-ddk-target.log"
 grep -Fq 'sunxifb' "${TMP}/build-out"
+
+# Reuse one actual OUT through both model transitions. The controlled CMake
+# stub fails if a stale cache survives, and the stamp assertions prove the
+# canonical entry point records the new model/root before each configuration.
+transition_out=${TMP}/out-transition
+transition_log=${TMP}/cmake-transition.log
+run_build ddk ddk target "${transition_out}" "${transition_log}" \
+  "${TMP}/mesa-a" "${TMP}/ddk-a" >"${TMP}/build-out" 2>"${TMP}/build-err"
+grep -Fxq 'PF_GPU_MODEL=ddk' "${transition_out}/.pocketforge-sdl-graphics-config"
+grep -Fxq "SUNXIFB_DDK_ROOT=${TMP}/ddk-a" "${transition_out}/.pocketforge-sdl-graphics-config"
+run_build open open target "${transition_out}" "${transition_log}" \
+  "${TMP}/mesa-b" "${TMP}/ddk-a" >"${TMP}/build-out" 2>"${TMP}/build-err"
+grep -Fxq 'PF_GPU_MODEL=open' "${transition_out}/.pocketforge-sdl-graphics-config"
+grep -Fxq "SUNXIFB_DDK_ROOT=${TMP}/mesa-b" "${transition_out}/.pocketforge-sdl-graphics-config"
+run_build ddk ddk target "${transition_out}" "${transition_log}" \
+  "${TMP}/mesa-b" "${TMP}/ddk-c" >"${TMP}/build-out" 2>"${TMP}/build-err"
+grep -Fxq 'PF_GPU_MODEL=ddk' "${transition_out}/.pocketforge-sdl-graphics-config"
+grep -Fxq "SUNXIFB_DDK_ROOT=${TMP}/ddk-c" "${transition_out}/.pocketforge-sdl-graphics-config"
+run_build ddk ddk target "${transition_out}" "${transition_log}" \
+  "${TMP}/mesa-b" "${TMP}/ddk-d" >"${TMP}/build-out" 2>"${TMP}/build-err"
+grep -Fxq 'PF_GPU_MODEL=ddk' "${transition_out}/.pocketforge-sdl-graphics-config"
+grep -Fxq "SUNXIFB_DDK_ROOT=${TMP}/ddk-d" "${transition_out}/.pocketforge-sdl-graphics-config"
 
 if run_build open open missing-gbm >"${TMP}/build-out" 2>"${TMP}/build-err"; then
   echo "FAIL: open build accepted missing target GBM metadata"

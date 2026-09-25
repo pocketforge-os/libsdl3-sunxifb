@@ -62,6 +62,14 @@ case "${PF_GPU_MODEL}" in
         exit 1
       fi
     done
+    for forbidden in libdrm.so libgbm.so; do
+      if printf '%s\n' "${dynamic}" \
+          | grep -F '(NEEDED)' \
+          | grep -F "[${forbidden}" >/dev/null; then
+        echo "FATAL: open SDL artifact links ${forbidden} directly instead of using dynamic KMSDRM loading" >&2
+        exit 1
+      fi
+    done
     ;;
   ddk)
     if ! has_artifact_string sunxifb; then

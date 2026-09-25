@@ -78,7 +78,10 @@ The canonical `build/build-libsdl3.sh` recipe disables both SDL pkg-config
 RPATH handling and CMake build/install RPATH generation. It enables dynamic
 KMSDRM only for `PF_GPU_MODEL=open`; the default/closed build keeps KMSDRM off
 and retains sunxifb. Open configuration also restricts pkg-config to the target
-sysroot and requires target libdrm and GBM metadata before CMake runs.
+sysroot and requires target libdrm and GBM metadata before CMake runs. Reusing
+the same `/work/out` across GPU models is supported: the recipe fingerprints
+`PF_GPU_MODEL` and the selected EGL/GLES root and clears CMake's discovery
+cache when either changes, while preserving the published artifact paths.
 
 The shipped `libSDL3-pocketforge.so.0` must have neither `DT_RPATH` nor
 `DT_RUNPATH`: a host build path is not a valid runtime dependency, and a
@@ -86,9 +89,10 @@ trailing empty loader-path component would search the current working
 directory. Artifact verification fails closed if either dynamic tag is
 present, if EGL/GLES dependencies are absent, or if the compiled backend set
 does not match the selected GPU model. For open artifacts, exact embedded
-`kmsdrm`, `sunxifb`, `libdrm.so.2`, and `libgbm.so.1` strings are compiled
-evidence that the dynamic KMSDRM backend was included; CMake flags alone are
-not accepted as artifact evidence.
+`kmsdrm`, `sunxifb`, `libdrm.so.2`, and `libgbm.so.1` strings plus the absence
+of direct `DT_NEEDED` entries for libdrm/libgbm are compiled evidence that the
+dynamic KMSDRM backend was included; CMake flags alone are not accepted as
+artifact evidence.
 
 The source-level contract for this policy can be checked without the cross
 toolchain or proprietary DDK input:

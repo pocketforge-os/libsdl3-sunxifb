@@ -110,6 +110,23 @@ if [ "${PF_GPU_MODEL}" = open ]; then
   require_target_pkg_config gbm
 fi
 
+# CMake caches graphics-library discovery by variable name, while OUT is the
+# public artifact directory and is intentionally reusable. Invalidate only the
+# CMake discovery cache when the selected model or graphics prefix changes so a
+# closed-to-open (or open-to-closed) rebuild cannot retain the other model's
+# EGL/GLES paths. An unstamped pre-policy build directory is treated as stale.
+mkdir -p "${OUT}"
+GRAPHICS_CONFIG_STAMP=${OUT}/.pocketforge-sdl-graphics-config
+GRAPHICS_CONFIG_CURRENT=${GRAPHICS_CONFIG_STAMP}.current
+printf 'PF_GPU_MODEL=%s\nSUNXIFB_DDK_ROOT=%s\n' \
+  "${PF_GPU_MODEL}" "${DDK_ROOT}" >"${GRAPHICS_CONFIG_CURRENT}"
+if [ ! -f "${GRAPHICS_CONFIG_STAMP}" ] || \
+    ! cmp -s "${GRAPHICS_CONFIG_CURRENT}" "${GRAPHICS_CONFIG_STAMP}"; then
+  rm -f "${OUT}/CMakeCache.txt"
+  rm -rf "${OUT}/CMakeFiles"
+fi
+mv "${GRAPHICS_CONFIG_CURRENT}" "${GRAPHICS_CONFIG_STAMP}"
+
 cmake -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=/opt/cmake/toolchain-arm-10.3-2021.07.cmake \
   -DCMAKE_BUILD_TYPE=Release \
