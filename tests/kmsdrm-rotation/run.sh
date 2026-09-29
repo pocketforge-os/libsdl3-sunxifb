@@ -13,7 +13,9 @@
 #   3. backend   an SDL app on this tree's KMSDRM backend over fake-kms.c, for
 #                each present path (atomic fenced, atomic double-buffered,
 #                legacy) and orientation, including the Normal negative control
-#                and the SDL_KMSDRM_PRESENT_ROTATION=0 opt-out;
+#                and the SDL_KMSDRM_PRESENT_ROTATION=0 opt-out, and a stack
+#                missing a GL entry point mid-table (window creation must fail
+#                cleanly);
 #   4. red       the same app on the base commit's SDL must fail for a panel
 #                reporting Left Side Up (skipped once the base has the fix).
 set -euo pipefail
@@ -85,13 +87,20 @@ if grep -qE 'SDL_kmsdrm(rotate|orientation|rotategl)\.[ch]' "$WORK/warnings-head
 fi
 
 step "3. backend: fake display stack"
-mkdir -p "$WORK/fake"
-# shellcheck disable=SC2046
-cc "${STRICT[@]}" -fPIC -shared -Wl,-soname,libfake-kms.so $(pkg-config --cflags libdrm gbm) \
-    -o "$WORK/fake/libfake-kms.so" "$T/fake-kms.c"
-for soname in libdrm.so.2 libgbm.so.1 libEGL.so.1 libGLESv2.so.2; do
-    ln -sf libfake-kms.so "$WORK/fake/$soname"
-done
+# fake: the full stack. fake-nolink: the same stack without glLinkProgram.
+build_fake() {
+    local dir=$1
+    shift
+    mkdir -p "$dir"
+    # shellcheck disable=SC2046
+    cc "${STRICT[@]}" "$@" -fPIC -shared -Wl,-soname,libfake-kms.so $(pkg-config --cflags libdrm gbm) \
+        -o "$dir/libfake-kms.so" "$T/fake-kms.c"
+    for soname in libdrm.so.2 libgbm.so.1 libEGL.so.1 libGLESv2.so.2; do
+        ln -sf libfake-kms.so "$dir/$soname"
+    done
+}
+build_fake "$WORK/fake"
+build_fake "$WORK/fake-nolink" -DFAKE_KMS_OMIT_GL_LINK_PROGRAM
 # The app's own sources are held to -Werror; SDL's public headers are not ours.
 # shellcheck disable=SC2046
 cc -std=c99 -O1 -g -Wall -Wextra "${NOX11[@]}" $(pkg-config --cflags gbm) \
@@ -103,11 +112,13 @@ mkdir -p /dev/dri
 
 failed=()
 # name, SDL prefix, orientation, atomic, native fence, fence sync, opt-out hint, expected rotation, expected panel property
+# (FAKE_DIR and EXPECT_WINDOW_FAIL, when set by the caller, select the stack and the expected outcome)
 run_case() {
     local name=$1 prefix=$2 orientation=$3 atomic=$4 native=$5 fences=$6 hint=$7 rotation=$8 panel=$9
     local log="$WORK/case-$name.log" rc=0
     env -u SDL_KMSDRM_PRESENT_ROTATION \
-        LD_LIBRARY_PATH="$WORK/fake:$WORK/prefix-$prefix/lib" \
+        LD_LIBRARY_PATH="${FAKE_DIR:-$WORK/fake}:$WORK/prefix-$prefix/lib" \
+        EXPECT_WINDOW_FAIL="${EXPECT_WINDOW_FAIL:-0}" \
         FAKE_KMS_PANEL_ORIENTATION="$orientation" FAKE_KMS_ATOMIC="$atomic" \
         FAKE_EGL_NATIVE_FENCE="$native" FAKE_EGL_FENCE_SYNC="$fences" \
         EXPECT_ROTATION="$rotation" EXPECT_PANEL_PROP="$panel" \
@@ -141,6 +152,15 @@ no-property-fenced  none           1 1 1 - 0   0
 lsu-no-fence-sync   Left_Side_Up   1 0 0 - 90  0
 lsu-opt-out         Left_Side_Up   1 1 1 0 0   90
 EOF
+
+# A GL entry point missing in the middle of the rotate pass's table: window
+# creation fails cleanly (nothing called through the missing entry point, no
+# surface, buffer, context or sync left behind).
+if ! FAKE_DIR="$WORK/fake-nolink" EXPECT_WINDOW_FAIL=1 \
+    run_case lsu-gl-load-fails head "Left Side Up" 1 1 1 "" 90 0; then
+    failed+=(lsu-gl-load-fails)
+    sed 's/^/    /' "$WORK/case-lsu-gl-load-fails.log"
+fi
 
 if [ "${#failed[@]}" -ne 0 ]; then
     echo "FAIL: backend scenarios: ${failed[*]}" >&2

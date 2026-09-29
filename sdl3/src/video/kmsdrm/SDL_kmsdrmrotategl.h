@@ -73,12 +73,20 @@ typedef struct KMSDRM_RotateGL
     GLuint program;
 } KMSDRM_RotateGL;
 
-// Returns 1 when every entry point resolved, 0 otherwise (nothing is called).
+/* Resolves every entry point. Returns 1 when all of them resolved, 0 otherwise.
+   The table is all-or-nothing: entry points are resolved into a local table,
+   which is installed only when complete, so on failure *gl is all NULL with
+   program 0 (never partly loaded or uninitialized), and KMSDRM_RotateGL_Fini
+   is safe on it. No GL function is called. */
 static inline int KMSDRM_RotateGL_Load(KMSDRM_RotateGL *gl, KMSDRM_RotateGLLoader load, void *userdata)
 {
+    const KMSDRM_RotateGL empty = { 0 };
+    KMSDRM_RotateGL loaded = { 0 };
+
+    *gl = empty;
 #define KMSDRM_ROTATEGL_LOAD(TYPE, NAME)                        \
-    gl->NAME = (TYPE)load(userdata, "gl" #NAME);                \
-    if (!gl->NAME) {                                            \
+    loaded.NAME = (TYPE)load(userdata, "gl" #NAME);             \
+    if (!loaded.NAME) {                                         \
         return 0;                                               \
     }
     KMSDRM_ROTATEGL_LOAD(PFNGLACTIVETEXTUREPROC, ActiveTexture);
@@ -109,7 +117,8 @@ static inline int KMSDRM_RotateGL_Load(KMSDRM_RotateGL *gl, KMSDRM_RotateGLLoade
     KMSDRM_ROTATEGL_LOAD(PFNGLVERTEXATTRIBPOINTERPROC, VertexAttribPointer);
     KMSDRM_ROTATEGL_LOAD(PFNGLVIEWPORTPROC, Viewport);
 #undef KMSDRM_ROTATEGL_LOAD
-    gl->program = 0;
+    loaded.program = 0;
+    *gl = loaded;
     return 1;
 }
 
@@ -226,13 +235,15 @@ static inline void KMSDRM_RotateGL_Draw(const KMSDRM_RotateGL *gl, GLuint textur
     gl->DrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
-// The rotate context must be current.
+/* Deletes the program. The rotate context must be current when a program
+   exists. Safe on a table KMSDRM_RotateGL_Load left empty and on one whose
+   KMSDRM_RotateGL_Init failed (program 0): it then calls nothing. */
 static inline void KMSDRM_RotateGL_Fini(KMSDRM_RotateGL *gl)
 {
-    if (gl->program) {
+    if (gl->program && gl->DeleteProgram) {
         gl->DeleteProgram(gl->program);
-        gl->program = 0;
     }
+    gl->program = 0;
 }
 
 #endif // SDL_kmsdrmrotategl_h_

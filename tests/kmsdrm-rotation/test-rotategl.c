@@ -70,7 +70,7 @@ static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation)
     PFNGLPIXELSTOREIPROC PixelStorei = (PFNGLPIXELSTOREIPROC)eglGetProcAddress("glPixelStorei");
     PFNGLCLEARCOLORPROC ClearColor = (PFNGLCLEARCOLORPROC)eglGetProcAddress("glClearColor");
     PFNGLCLEARPROC Clear = (PFNGLCLEARPROC)eglGetProcAddress("glClear");
-    KMSDRM_RotateGL gl;
+    KMSDRM_RotateGL gl = { 0 };
     EGLSurface surface;
     unsigned char *src, *out;
     GLuint texture = 0;
@@ -85,6 +85,9 @@ static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation)
     if (!TexImage2D || !ReadPixels || !PixelStorei || !ClearColor || !Clear ||
         !KMSDRM_RotateGL_Load(&gl, load_proc, NULL) || !KMSDRM_RotateGL_Init(&gl)) {
         printf("FAIL: rotation %d: GLES2 entry points or the rotate program are unavailable\n", rotation);
+        KMSDRM_RotateGL_Fini(&gl); // safe on an empty or program-less table
+        eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroySurface(dpy, surface);
         return 1;
     }
 
@@ -149,7 +152,9 @@ static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation)
         ++failures;
     }
 
-    gl.DeleteTextures(1, &texture);
+    if (texture) {
+        gl.DeleteTextures(1, &texture);
+    }
     KMSDRM_RotateGL_Fini(&gl);
     eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroySurface(dpy, surface);

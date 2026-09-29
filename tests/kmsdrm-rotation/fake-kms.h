@@ -60,6 +60,10 @@ typedef struct FakeKmsReport
     int cross_context_waits;   // eglWaitSyncKHR on a fence made in another context
     int client_waits;          // eglClientWaitSyncKHR calls
 
+    // Built with -DFAKE_KMS_OMIT_GL_LINK_PROGRAM: glLinkProgram is neither exported
+    // nor resolvable, and eglGetProcAddress("glLinkProgram") is counted here.
+    int omitted_proc_requests;
+
     // The last buffer put on the panel (SetCrtc, page flip, or atomic FB_ID).
     int scanouts;
     int scanout_surface;       // gbm surface index, -1 for a non-surface FB

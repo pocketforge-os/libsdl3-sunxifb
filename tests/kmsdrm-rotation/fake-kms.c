@@ -18,6 +18,10 @@
  *   FAKE_KMS_ATOMIC             1 | 0   atomic modesetting   (default 1)
  *   FAKE_EGL_NATIVE_FENCE       1 | 0   EGL_ANDROID_native_fence_sync (1)
  *   FAKE_EGL_FENCE_SYNC         1 | 0   EGL_KHR_fence_sync + wait_sync (1)
+ *
+ * Built with -DFAKE_KMS_OMIT_GL_LINK_PROGRAM, the stack lacks glLinkProgram (an
+ * entry point in the middle of the rotate pass's table): it is neither exported
+ * (dlsym fails) nor returned by eglGetProcAddress.
  */
 #define _GNU_SOURCE
 #define EGL_EGLEXT_PROTOTYPES 1
@@ -1618,7 +1622,9 @@ FAKE_EXPORT void glEnable(GLenum cap) { (void)cap; gl_ctx("glEnable"); }
 FAKE_EXPORT void glEnableVertexAttribArray(GLuint index) { (void)index; gl_ctx("glEnableVertexAttribArray"); }
 FAKE_EXPORT void glFinish(void) { gl_ctx("glFinish"); }
 FAKE_EXPORT void glFlush(void) { gl_ctx("glFlush"); }
+#ifndef FAKE_KMS_OMIT_GL_LINK_PROGRAM
 FAKE_EXPORT void glLinkProgram(GLuint program) { (void)program; gl_ctx("glLinkProgram"); }
+#endif
 FAKE_EXPORT void glPixelStorei(GLenum pname, GLint param) { (void)pname; (void)param; gl_ctx("glPixelStorei"); }
 FAKE_EXPORT void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *string, const GLint *length) { (void)shader; (void)count; (void)string; (void)length; gl_ctx("glShaderSource"); }
 FAKE_EXPORT void glTexParameteri(GLenum target, GLenum pname, GLint param) { (void)target; (void)pname; (void)param; gl_ctx("glTexParameteri"); }
@@ -1818,7 +1824,10 @@ static const struct
     FAKE_PROC(glDisable), FAKE_PROC(glEnable), FAKE_PROC(glDrawArrays), FAKE_PROC(glEnableVertexAttribArray),
     FAKE_PROC(glFinish), FAKE_PROC(glFlush), FAKE_PROC(glGenTextures), FAKE_PROC(glGetError), FAKE_PROC(glGetIntegerv),
     FAKE_PROC(glGetProgramiv), FAKE_PROC(glGetShaderiv), FAKE_PROC(glGetString), FAKE_PROC(glGetUniformLocation),
-    FAKE_PROC(glLinkProgram), FAKE_PROC(glPixelStorei), FAKE_PROC(glShaderSource), FAKE_PROC(glTexParameteri),
+#ifndef FAKE_KMS_OMIT_GL_LINK_PROGRAM
+    FAKE_PROC(glLinkProgram),
+#endif
+    FAKE_PROC(glPixelStorei), FAKE_PROC(glShaderSource), FAKE_PROC(glTexParameteri),
     FAKE_PROC(glUniform1i), FAKE_PROC(glUseProgram), FAKE_PROC(glVertexAttribPointer), FAKE_PROC(glViewport),
     FAKE_PROC(glEGLImageTargetTexture2DOES),
 };
@@ -1826,6 +1835,12 @@ static const struct
 FAKE_EXPORT __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *procname)
 {
     size_t i;
+#ifdef FAKE_KMS_OMIT_GL_LINK_PROGRAM
+    if (strcmp(procname, "glLinkProgram") == 0) {
+        g_report.omitted_proc_requests++;
+        return NULL;
+    }
+#endif
     for (i = 0; i < sizeof(g_procs) / sizeof(g_procs[0]); ++i) {
         if (strcmp(g_procs[i].name, procname) == 0) {
             return (__eglMustCastToProperFunctionPointerType)g_procs[i].proc;

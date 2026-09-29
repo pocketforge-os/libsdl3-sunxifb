@@ -152,10 +152,13 @@ void KMSDRM_Rotate_Destroy(SDL_VideoDevice *_this, SDL_Window *window)
         KMSDRM_gbm_surface_release_buffer(windata->gs, rot->pending_bo);
     }
 
+    /* No GL call here: the program and textures die with the context. That
+       also keeps teardown safe after a partial Create, where the GL table
+       (KMSDRM_RotateGL_Load is all-or-nothing) may be empty and no image
+       exists yet. */
     if (egl) {
-        // The textures die with the context; the images are separate objects.
         for (i = 0; i < rot->num_images; ++i) {
-            if (rot->images[i].image != EGL_NO_IMAGE_KHR) {
+            if (rot->images[i].image != EGL_NO_IMAGE_KHR && rot->eglDestroyImageKHR) {
                 rot->eglDestroyImageKHR(egl->egl_display, rot->images[i].image);
             }
         }

@@ -6,6 +6,11 @@
  * Environment (set by run.sh per scenario):
  *   EXPECT_ROTATION    degrees SDL must apply at present (0 = no rotated present)
  *   EXPECT_PANEL_PROP  SDL_PROP_DISPLAY_KMSDRM_PANEL_ORIENTATION_NUMBER expected
+ *   EXPECT_WINDOW_FAIL 1: the stack lacks a GL entry point in the middle of the
+ *                      rotate pass's table (fake built with
+ *                      -DFAKE_KMS_OMIT_GL_LINK_PROGRAM), so creating the GL
+ *                      window must fail cleanly: no call through a missing
+ *                      entry point, and nothing left alive or locked
  *   FAKE_KMS_ATOMIC, FAKE_EGL_FENCE_SYNC   (read by the fake too)
  *
  * Checks what an application sees (display mode and window size: 1280x720 for
@@ -81,6 +86,7 @@ int main(void)
     const int expect_panel_prop = env_int("EXPECT_PANEL_PROP", 0);
     const int atomic = env_int("FAKE_KMS_ATOMIC", 1);
     const int fence_sync = env_int("FAKE_EGL_FENCE_SYNC", 1);
+    const int expect_window_fail = env_int("EXPECT_WINDOW_FAIL", 0);
     const int swaps_axes = expect_rotation == 90 || expect_rotation == 270;
     const int lw = swaps_axes ? FAKE_KMS_PANEL_H : FAKE_KMS_PANEL_W;
     const int lh = swaps_axes ? FAKE_KMS_PANEL_W : FAKE_KMS_PANEL_H;
@@ -131,6 +137,30 @@ int main(void)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
     window = SDL_CreateWindow("kmsdrm-rotation", desktop ? desktop->w : lw, desktop ? desktop->h : lh,
                               SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
+    if (expect_window_fail) {
+        printf("SDL_CreateWindow: %s (%s)\n", window ? "created" : "failed", window ? "" : SDL_GetError());
+        CHECK(report->omitted_proc_requests >= 1,
+              "the rotate pass asked for the missing mid-table entry point (%d requests)", report->omitted_proc_requests);
+        CHECK(!window, "a GL entry point missing mid-table fails GL window creation instead of presenting unrotated");
+        CHECK(report->draws == 0 && report->images_created == 0, "no rotate pass ran (%d draws, %d images)",
+              report->draws, report->images_created);
+        if (window) {
+            SDL_DestroyWindow(window);
+        }
+        for (i = 0; i < report->surfaces_created; ++i) {
+            alive += report->surfaces[i].alive;
+            locked += report->surfaces[i].locked_now;
+        }
+        CHECK(alive == 0 && locked == 0, "after the failure: no GBM surface alive (%d) and no buffer locked (%d)",
+              alive, locked);
+        CHECK(report->contexts_alive == 0 && report->syncs_alive == 0,
+              "after the failure: no EGL context (%d) or sync (%d) alive", report->contexts_alive, report->syncs_alive);
+        CHECK(report->errors == 0, "the fake display stack saw %d contract violations%s%s", report->errors,
+              report->errors ? "; first: " : "", report->first_error);
+        SDL_Quit();
+        printf("RESULT: %s\n", failures ? "FAIL" : "PASS");
+        return failures ? 1 : 0;
+    }
     if (!window) {
         printf("FAIL: SDL_CreateWindow: %s\n", SDL_GetError());
         return 1;
