@@ -14,8 +14,17 @@
 #
 # Subsystems explicitly OFF: video backends our BSP can't drive (X11, Wayland,
 # Vivante, RPi), Vulkan (no PowerVR Vulkan ICD), OpenGL (we use OpenGL ES),
-# Camera/Tray (not needed), Static library (we ship shared only). KMSDRM is
-# enabled only for the open Mesa model and remains disabled for the closed DDK.
+# Camera/Tray (not needed), Static library (we ship shared only). The GPU
+# model selects exactly one native display backend: KMSDRM for the open Mesa
+# model, sunxifb for the closed DDK (tsp-f3fm.218).
+#
+# sunxifb is compiled only for the closed DDK. SDL bootstraps sunxifb before
+# KMSDRM and takes the first driver that creates, so an open build carrying both
+# selected sunxifb, whose window surface is an EGL surface on native window 0.
+# Only the vendor DDK accepts that; Mesa rejects it and SDL_CreateWindow fails
+# ("sunxifb: Can't create EGL window surface"). An open artifact must therefore
+# not contain sunxifb at all; verify-libsdl3-artifact.sh enforces this on the
+# built library.
 #
 # Run inside pocketforge/cross-build:10.3-2021.07-bookworm with:
 #   /work/src   <- libsdl3-sunxifb source tree (read-only)
@@ -46,7 +55,9 @@ TARGET_INCLUDEDIR=${TARGET_SYSROOT}/usr/include
 # CMAKE_FIND_ROOT_PATH entry to locate `include/EGL/egl.h` + `libEGL.so`/`libGLESv2.so`
 # — it is not DDK-specific despite the name, so pointing it at the open Mesa install
 # tree's prefix (which ships the same include/EGL + lib/libEGL.so shape) needs no
-# cmake change at all.
+# cmake change at all. The open model compiles no sunxifb, but it still passes its
+# EGL/GLES prefix as SUNXIFB_DDK_ROOT: the toolchain file appends that root to
+# CMAKE_FIND_ROOT_PATH before CheckEGL, and KMSDRM requires HAVE_OPENGL_EGL.
 # Fail CLOSED on an EXPLICITLY-set-but-unrecognized value, never on the DOCUMENTED
 # default (coordinator review, round 2 — the round-1 fix over-corrected: making a bare
 # UNSET PF_GPU_MODEL fatal broke this script's own documented canonical closed-DDK
@@ -60,11 +71,13 @@ case "${PF_GPU_MODEL}" in
   open)
     DDK_ROOT="${SUNXIFB_MESA_ROOT:?SUNXIFB_MESA_ROOT must be set for PF_GPU_MODEL=open (the open Mesa install tree prefix, e.g. .../usr/local — the C1 gpu-um-mesa stage output)}"
     SDL_KMSDRM=ON
+    SDL_SUNXIFB=OFF
     ;;
   ddk)
     # Pin DDK root unless caller already set it (multi-BVNC futures want override).
     DDK_ROOT="${SUNXIFB_DDK_ROOT:-${BLOBS}}"
     SDL_KMSDRM=OFF
+    SDL_SUNXIFB=ON
     ;;
   *)
     echo "FATAL: PF_GPU_MODEL must be 'ddk' or 'open', got '${PF_GPU_MODEL}' (an unset/empty value defaults to 'ddk' — this is an explicitly-set unrecognized value, likely a typo)" >&2
@@ -133,7 +146,7 @@ cmake -G Ninja \
   -DCMAKE_SKIP_RPATH=ON \
   -DSUNXIFB_DDK_ROOT="${DDK_ROOT}" \
   \
-  -DSDL_SUNXIFB=ON \
+  -DSDL_SUNXIFB="${SDL_SUNXIFB}" \
   -DSDL_X11=OFF -DSDL_WAYLAND=OFF \
   -DSDL_KMSDRM="${SDL_KMSDRM}" -DSDL_KMSDRM_SHARED=ON \
   -DSDL_VIVANTE=OFF -DSDL_RPI=OFF -DSDL_OFFSCREEN=OFF \
