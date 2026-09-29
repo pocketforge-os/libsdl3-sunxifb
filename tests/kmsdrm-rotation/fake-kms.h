@@ -50,6 +50,12 @@ typedef struct FakeKmsReport
 
     int contexts_created;
     int contexts_alive;
+    int egl_surfaces_alive;
+    // FAKE_EGL_FAIL_MAKECURRENT_SURFACE=N: eglMakeCurrent failures injected when a
+    // context is bound to an EGL surface made from gbm surface N (once).
+    int injected_makecurrent_failures;
+    // vkEnumerateInstanceExtensionProperties calls (the fake libvulkan.so.1).
+    int vulkan_enumerations;
     int images_created;
     int images_alive;
 

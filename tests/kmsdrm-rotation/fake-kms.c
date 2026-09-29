@@ -18,6 +18,14 @@
  *   FAKE_KMS_ATOMIC             1 | 0   atomic modesetting   (default 1)
  *   FAKE_EGL_NATIVE_FENCE       1 | 0   EGL_ANDROID_native_fence_sync (1)
  *   FAKE_EGL_FENCE_SYNC         1 | 0   EGL_KHR_fence_sync + wait_sync (1)
+ *   FAKE_EGL_FAIL_MAKECURRENT_SURFACE  N: the first eglMakeCurrent that binds
+ *                               a context to an EGL surface made from gbm
+ *                               surface N (in creation order) fails
+ *
+ * It is also installed as libvulkan.so.1: vkGetInstanceProcAddr and
+ * vkEnumerateInstanceExtensionProperties (VK_KHR_surface, VK_KHR_display) are
+ * enough for SDL to load Vulkan and create a Vulkan window; no instance or
+ * surface is modelled.
  *
  * Built with -DFAKE_KMS_OMIT_GL_LINK_PROGRAM, the stack lacks glLinkProgram (an
  * entry point in the middle of the rotate pass's table): it is neither exported
@@ -117,6 +125,7 @@ static int g_has_orientation = 1;
 static int g_atomic = 1;
 static int g_native_fence = 1;
 static int g_fence_sync = 1;
+static int g_fail_makecurrent_surface = -1;
 static char g_display_extensions[512];
 static drmModeModeInfo g_mode;
 
@@ -173,6 +182,9 @@ static void fake_init(void)
     g_atomic = env_flag("FAKE_KMS_ATOMIC", 1);
     g_native_fence = env_flag("FAKE_EGL_NATIVE_FENCE", 1);
     g_fence_sync = env_flag("FAKE_EGL_FENCE_SYNC", 1);
+    if (getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE") && *getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE")) {
+        g_fail_makecurrent_surface = atoi(getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE"));
+    }
 
     snprintf(g_display_extensions, sizeof(g_display_extensions),
              "EGL_KHR_image_base EGL_KHR_image_pixmap EGL_KHR_surfaceless_context "
@@ -1354,6 +1366,7 @@ FAKE_EXPORT EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config, 
     surface->alive = 1;
     surface->gs = gs;
     surface->config = cfg;
+    g_report.egl_surfaces_alive++;
     return (EGLSurface)surface;
 }
 
@@ -1378,6 +1391,7 @@ FAKE_EXPORT EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
         fake_error("eglDestroySurface on the current draw surface");
     }
     s->alive = 0;
+    g_report.egl_surfaces_alive--;
     return EGL_TRUE;
 }
 
@@ -1403,6 +1417,11 @@ FAKE_EXPORT EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurfac
     if (!ctx->alive || (d && !d->alive)) {
         fake_error("eglMakeCurrent with a dead context or surface");
         return egl_fail(EGL_BAD_CONTEXT);
+    }
+    if (d && d->gs && d->gs->index == g_fail_makecurrent_surface && !g_report.injected_makecurrent_failures) {
+        // Injected (FAKE_EGL_FAIL_MAKECURRENT_SURFACE): the current state is unchanged, as in EGL.
+        g_report.injected_makecurrent_failures++;
+        return egl_fail(EGL_BAD_ALLOC);
     }
     g_ctx = ctx;
     g_draw = d;
@@ -1799,6 +1818,51 @@ FAKE_EXPORT void glDrawArrays(GLenum mode, GLint first, GLsizei count)
     if (!draw->source_locked) {
         fake_error("rotate pass sampled a buffer the application surface may render into (not locked)");
     }
+}
+
+/* --------------------------------------------------------------- Vulkan -- */
+
+// VkExtensionProperties: char extensionName[VK_MAX_EXTENSION_NAME_SIZE = 256]; uint32_t specVersion.
+typedef struct FakeVkExtensionProperties
+{
+    char extensionName[256];
+    uint32_t specVersion;
+} FakeVkExtensionProperties;
+
+typedef void (*FakeVkVoidFunction)(void);
+
+static int32_t fake_vkEnumerateInstanceExtensionProperties(const char *layer, uint32_t *count,
+                                                           FakeVkExtensionProperties *properties)
+{
+    static const char *const names[] = { "VK_KHR_surface", "VK_KHR_display" };
+    const uint32_t total = 2;
+    uint32_t i, n;
+
+    g_report.vulkan_enumerations++;
+    if (layer) {
+        return -6; // VK_ERROR_LAYER_NOT_PRESENT
+    }
+    if (!properties) {
+        *count = total;
+        return 0; // VK_SUCCESS
+    }
+    n = *count < total ? *count : total;
+    for (i = 0; i < n; ++i) {
+        memset(&properties[i], 0, sizeof(properties[i]));
+        snprintf(properties[i].extensionName, sizeof(properties[i].extensionName), "%s", names[i]);
+        properties[i].specVersion = 1;
+    }
+    *count = n;
+    return n < total ? 5 : 0; // VK_INCOMPLETE : VK_SUCCESS
+}
+
+FAKE_EXPORT FakeVkVoidFunction vkGetInstanceProcAddr(void *instance, const char *name)
+{
+    fake_init();
+    if (!instance && name && strcmp(name, "vkEnumerateInstanceExtensionProperties") == 0) {
+        return (FakeVkVoidFunction)fake_vkEnumerateInstanceExtensionProperties;
+    }
+    return NULL;
 }
 
 /* --------------------------------------------------------- proc address -- */

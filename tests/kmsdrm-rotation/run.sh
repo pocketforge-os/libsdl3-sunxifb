@@ -13,11 +13,16 @@
 #   3. backend   an SDL app on this tree's KMSDRM backend over fake-kms.c, for
 #                each present path (atomic fenced, atomic double-buffered,
 #                legacy) and orientation, including the Normal negative control
-#                and the SDL_KMSDRM_PRESENT_ROTATION=0 opt-out, and a stack
+#                and the SDL_KMSDRM_PRESENT_ROTATION=0 opt-out, a stack
 #                missing a GL entry point mid-table (window creation must fail
-#                cleanly);
+#                cleanly), a failing final eglMakeCurrent in a surface rebuild
+#                (nothing may leak), and Vulkan windows (panel-native: the
+#                application owns the panel orientation);
 #   4. red       the same app on the base commit's SDL must fail for a panel
-#                reporting Left Side Up (skipped once the base has the fix).
+#                reporting Left Side Up (skipped once the base has the fix);
+#   5. red       the MakeCurrent-failure scenario on a71a8dab, the commit before
+#                the surface-rebuild cleanup fix, must fail on its leak
+#                (skipped when that commit is not in the checkout).
 set -euo pipefail
 
 SRC=${SRC:-/src}
@@ -95,7 +100,7 @@ build_fake() {
     # shellcheck disable=SC2046
     cc "${STRICT[@]}" "$@" -fPIC -shared -Wl,-soname,libfake-kms.so $(pkg-config --cflags libdrm gbm) \
         -o "$dir/libfake-kms.so" "$T/fake-kms.c"
-    for soname in libdrm.so.2 libgbm.so.1 libEGL.so.1 libGLESv2.so.2; do
+    for soname in libdrm.so.2 libgbm.so.1 libEGL.so.1 libGLESv2.so.2 libvulkan.so.1; do
         ln -sf libfake-kms.so "$dir/$soname"
     done
 }
@@ -112,13 +117,17 @@ mkdir -p /dev/dri
 
 failed=()
 # name, SDL prefix, orientation, atomic, native fence, fence sync, opt-out hint, expected rotation, expected panel property
-# (FAKE_DIR and EXPECT_WINDOW_FAIL, when set by the caller, select the stack and the expected outcome)
+# (FAKE_DIR, EXPECT_WINDOW_FAIL, EXPECT_VULKAN_WINDOW, EXPECT_MAKECURRENT_FAIL and
+# FAKE_EGL_FAIL_MAKECURRENT_SURFACE, when set by the caller, select the stack and the expected outcome)
 run_case() {
     local name=$1 prefix=$2 orientation=$3 atomic=$4 native=$5 fences=$6 hint=$7 rotation=$8 panel=$9
     local log="$WORK/case-$name.log" rc=0
     env -u SDL_KMSDRM_PRESENT_ROTATION \
         LD_LIBRARY_PATH="${FAKE_DIR:-$WORK/fake}:$WORK/prefix-$prefix/lib" \
         EXPECT_WINDOW_FAIL="${EXPECT_WINDOW_FAIL:-0}" \
+        EXPECT_VULKAN_WINDOW="${EXPECT_VULKAN_WINDOW:-0}" \
+        EXPECT_MAKECURRENT_FAIL="${EXPECT_MAKECURRENT_FAIL:-0}" \
+        FAKE_EGL_FAIL_MAKECURRENT_SURFACE="${FAKE_EGL_FAIL_MAKECURRENT_SURFACE:-}" \
         FAKE_KMS_PANEL_ORIENTATION="$orientation" FAKE_KMS_ATOMIC="$atomic" \
         FAKE_EGL_NATIVE_FENCE="$native" FAKE_EGL_FENCE_SYNC="$fences" \
         EXPECT_ROTATION="$rotation" EXPECT_PANEL_PROP="$panel" \
@@ -138,26 +147,46 @@ while read -r name orientation atomic native fences hint rotation panel; do
         sed 's/^/    /' "$WORK/case-$name.log"
     fi
 done <<'EOF'
-lsu-fenced          Left_Side_Up   1 1 1 - 90  0
-rsu-fenced          Right_Side_Up  1 1 1 - 270 0
+lsu-fenced          Left_Side_Up   1 1 1 - 90  90
+rsu-fenced          Right_Side_Up  1 1 1 - 270 270
 normal-fenced       Normal         1 1 1 - 0   0
-lsu-double          Left_Side_Up   1 0 1 - 90  0
-rsu-double          Right_Side_Up  1 0 1 - 270 0
+lsu-double          Left_Side_Up   1 0 1 - 90  90
+rsu-double          Right_Side_Up  1 0 1 - 270 270
 normal-double       Normal         1 0 1 - 0   0
-lsu-legacy          Left_Side_Up   0 0 1 - 90  0
-rsu-legacy          Right_Side_Up  0 0 1 - 270 0
+lsu-legacy          Left_Side_Up   0 0 1 - 90  90
+rsu-legacy          Right_Side_Up  0 0 1 - 270 270
 normal-legacy       Normal         0 0 1 - 0   0
-upside-down-fenced  Upside_Down    1 1 1 - 180 0
+upside-down-fenced  Upside_Down    1 1 1 - 180 180
 no-property-fenced  none           1 1 1 - 0   0
-lsu-no-fence-sync   Left_Side_Up   1 0 0 - 90  0
+lsu-no-fence-sync   Left_Side_Up   1 0 0 - 90  90
 lsu-opt-out         Left_Side_Up   1 1 1 0 0   90
 EOF
+
+# Vulkan windows stay panel-native: SDL rotates nothing for them, the display
+# keeps the true panel orientation, and the window reports the application owns
+# it (app_rotation). Normal is the negative control.
+for spec in "lsu-vulkan-window|Left Side Up|90|90" "normal-vulkan-window|Normal|0|0"; do
+    IFS='|' read -r name orientation rotation panel <<<"$spec"
+    if ! EXPECT_VULKAN_WINDOW=1 run_case "$name" head "$orientation" 1 1 1 "" "$rotation" "$panel"; then
+        failed+=("$name")
+        sed 's/^/    /' "$WORK/case-$name.log"
+    fi
+done
+
+# The final eglMakeCurrent of the frame-1 surface rebuild fails (gbm surface 2 is
+# the rebuilt application surface: 0 and 1 are the first application and present
+# surfaces). The swap fails and nothing the rebuild made may stay alive.
+if ! FAKE_EGL_FAIL_MAKECURRENT_SURFACE=2 EXPECT_MAKECURRENT_FAIL=1 \
+    run_case lsu-makecurrent-fails head "Left Side Up" 1 1 1 "" 90 90; then
+    failed+=(lsu-makecurrent-fails)
+    sed 's/^/    /' "$WORK/case-lsu-makecurrent-fails.log"
+fi
 
 # A GL entry point missing in the middle of the rotate pass's table: window
 # creation fails cleanly (nothing called through the missing entry point, no
 # surface, buffer, context or sync left behind).
 if ! FAKE_DIR="$WORK/fake-nolink" EXPECT_WINDOW_FAIL=1 \
-    run_case lsu-gl-load-fails head "Left Side Up" 1 1 1 "" 90 0; then
+    run_case lsu-gl-load-fails head "Left Side Up" 1 1 1 "" 90 90; then
     failed+=(lsu-gl-load-fails)
     sed 's/^/    /' "$WORK/case-lsu-gl-load-fails.log"
 fi
@@ -185,7 +214,7 @@ else
         echo "$added" >&2
         exit 1
     fi
-    if run_case base-lsu-fenced base "Left Side Up" 1 1 1 "" 90 0; then
+    if run_case base-lsu-fenced base "Left Side Up" 1 1 1 "" 90 90; then
         echo "FAIL: the base SDL passed a Left Side Up panel; the test does not detect the defect" >&2
         exit 1
     fi
@@ -195,6 +224,28 @@ else
         exit 1
     fi
     echo "ok: the base SDL reports a 720x1280 display for a Left Side Up panel (the defect this change fixes)"
+fi
+
+LEAK_SHA=a71a8dabfa80987340dd4f9cf608bbbf70288968
+step "5. red: the surface-rebuild cleanup before its fix ($LEAK_SHA)"
+if ! git -C "$SRC" cat-file -e "$LEAK_SHA^{commit}" 2>/dev/null; then
+    echo "SKIP: $LEAK_SHA is not in this checkout"
+else
+    mkdir -p "$WORK/leak-src"
+    git -C "$SRC" archive "$LEAK_SHA" sdl3 | tar -x -C "$WORK/leak-src"
+    build_sdl "$WORK/leak-src" leak
+    if FAKE_EGL_FAIL_MAKECURRENT_SURFACE=2 EXPECT_MAKECURRENT_FAIL=1 \
+        run_case leak-lsu-makecurrent-fails leak "Left Side Up" 1 1 1 "" 90 90; then
+        echo "FAIL: $LEAK_SHA passed the MakeCurrent-failure scenario; the test does not detect the leak" >&2
+        exit 1
+    fi
+    if ! grep -q 'FAIL: after the failed surface rebuild: nothing leaked' "$WORK/case-leak-lsu-makecurrent-fails.log"; then
+        echo "FAIL: $LEAK_SHA failed the scenario, but not on the leak:" >&2
+        sed 's/^/    /' "$WORK/case-leak-lsu-makecurrent-fails.log" >&2
+        exit 1
+    fi
+    grep -E 'injected failures|FAIL: after the failed surface rebuild' "$WORK/case-leak-lsu-makecurrent-fails.log"
+    echo "ok: $LEAK_SHA leaks the rebuild's surfaces and context when the final eglMakeCurrent fails (the defect fixed here)"
 fi
 
 step "RESULT: PASS"

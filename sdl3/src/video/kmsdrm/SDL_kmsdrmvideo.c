@@ -1352,12 +1352,13 @@ static void KMSDRM_AddDisplay(SDL_VideoDevice *_this, drmModeConnector *conn, dr
         goto cleanup;
     }
 
-    /* SDL_PROP_DISPLAY_KMSDRM_PANEL_ORIENTATION_NUMBER is documented as the
-       transformation the application is responsible for: none while this
-       backend rotates, so apps that honour it do not rotate a second time. */
+    /* PocketForge: the display keeps the TRUE panel orientation (a fact about
+       the panel, needed by Vulkan windows, which stay panel-native). What SDL
+       rotates and what the application still owns are per window: see the
+       orientation contract in SDL_kmsdrmrotate.h. */
     display_properties = SDL_GetDisplayProperties(display_id);
     SDL_SetNumberProperty(display_properties, SDL_PROP_DISPLAY_KMSDRM_PANEL_ORIENTATION_NUMBER,
-                          dispdata->panel_orientation - dispdata->present_rotation);
+                          dispdata->panel_orientation);
     SDL_SetNumberProperty(display_properties, SDL_PROP_DISPLAY_KMSDRM_PRESENT_ROTATION_NUMBER,
                           dispdata->present_rotation);
 
@@ -1859,8 +1860,6 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
     if (windata->rotation != 0) {
         if (!KMSDRM_Rotate_Create(_this, window, windata->rotation,
                                   dispdata->mode.hdisplay, dispdata->mode.vdisplay)) {
-            SDL_EGL_DestroySurface(_this, windata->egl_surface);
-            windata->egl_surface = EGL_NO_SURFACE;
             result = false;
             goto cleanup;
         }
@@ -1881,13 +1880,25 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
 cleanup:
 
     if (!result) {
-        // Error (complete) cleanup.
+        /* Error (complete) cleanup. PocketForge: everything this function made
+           is torn down, whichever step failed (including the final
+           SDL_EGL_MakeCurrent): the rotated present's surface and context
+           first (it may hold application buffers), then the application's EGL
+           surface, then its GBM surface. A later rebuild starts from nothing,
+           so windata->rotate can never be overwritten while alive. No bo or
+           next_bo exists here: any previous surfaces were destroyed above. */
+        KMSDRM_Rotate_Destroy(_this, window);
+        windata->present_gs = NULL;
+        windata->present_egl_surface = EGL_NO_SURFACE;
+        if (windata->egl_surface != EGL_NO_SURFACE) {
+            SDL_EGL_MakeCurrent(_this, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            SDL_EGL_DestroySurface(_this, windata->egl_surface);
+            windata->egl_surface = EGL_NO_SURFACE;
+        }
         if (windata->gs) {
             KMSDRM_gbm_surface_destroy(windata->gs);
             windata->gs = NULL;
         }
-        windata->present_gs = NULL;
-        windata->present_egl_surface = EGL_NO_SURFACE;
     }
 
     return result;
@@ -2249,6 +2260,13 @@ bool KMSDRM_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_Propert
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_KMSDRM_DEVICE_INDEX_NUMBER, viddata->devindex);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_KMSDRM_DRM_FD_NUMBER, viddata->drm_fd);
     SDL_SetPointerProperty(props, SDL_PROP_WINDOW_KMSDRM_GBM_DEVICE_POINTER, viddata->gbm_dev);
+
+    /* PocketForge: this window's orientation contract (SDL_kmsdrmrotate.h).
+       windata->rotation is set only for GL windows; a Vulkan window stays
+       panel-native, so its application owns the whole panel orientation. */
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_KMSDRM_PRESENT_ROTATION_NUMBER, windata->rotation);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_KMSDRM_APP_ROTATION_NUMBER,
+                          (dispdata->panel_orientation - windata->rotation + 360) % 360);
 
     if ((window->flags & SDL_WINDOW_NOT_FOCUSABLE) == 0) {
         /* Focus on the newly created window.

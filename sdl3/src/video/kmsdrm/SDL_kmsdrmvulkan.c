@@ -210,7 +210,10 @@ bool KMSDRM_Vulkan_CreateSurface(SDL_VideoDevice *_this,
 
     /* PocketForge: a rotated display reports its logical size, but the rotated
        present is GL-only; a Vulkan display-plane surface stays panel-native and
-       the application owns any transformation. */
+       the application owns the transformation. The window reports it as
+       SDL.window.KMSDRM.pocketforge.app_rotation (the panel orientation), and
+       the display keeps the true SDL_PROP_DISPLAY_KMSDRM_PANEL_ORIENTATION_NUMBER
+       (see the orientation contract in SDL_kmsdrmrotate.h). */
     SDL_DisplayData *dispdata = SDL_GetDisplayDriverDataForWindow(window);
     const int surface_rotation = dispdata ? dispdata->present_rotation : 0;
     const uint32_t surface_w = (uint32_t)(KMSDRM_RotationSwapsAxes(surface_rotation) ? window->h : window->w);

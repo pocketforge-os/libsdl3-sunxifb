@@ -6,6 +6,15 @@
  * Environment (set by run.sh per scenario):
  *   EXPECT_ROTATION    degrees SDL must apply at present (0 = no rotated present)
  *   EXPECT_PANEL_PROP  SDL_PROP_DISPLAY_KMSDRM_PANEL_ORIENTATION_NUMBER expected
+ *                      (the true panel orientation). A GL window must report
+ *                      present_rotation = EXPECT_ROTATION and app_rotation =
+ *                      EXPECT_PANEL_PROP - EXPECT_ROTATION (mod 360).
+ *   EXPECT_VULKAN_WINDOW 1: create a Vulkan window instead (the fake is also
+ *                      libvulkan.so.1). It stays panel-native, so it must report
+ *                      present_rotation 0 and app_rotation = EXPECT_PANEL_PROP.
+ *   EXPECT_MAKECURRENT_FAIL 1: FAKE_EGL_FAIL_MAKECURRENT_SURFACE makes the final
+ *                      eglMakeCurrent of the frame-1 surface rebuild fail; the
+ *                      swap must fail with nothing leaked
  *   EXPECT_WINDOW_FAIL 1: the stack lacks a GL entry point in the middle of the
  *                      rotate pass's table (fake built with
  *                      -DFAKE_KMS_OMIT_GL_LINK_PROGRAM), so creating the GL
@@ -87,6 +96,9 @@ int main(void)
     const int atomic = env_int("FAKE_KMS_ATOMIC", 1);
     const int fence_sync = env_int("FAKE_EGL_FENCE_SYNC", 1);
     const int expect_window_fail = env_int("EXPECT_WINDOW_FAIL", 0);
+    const int expect_vulkan_window = env_int("EXPECT_VULKAN_WINDOW", 0);
+    const int expect_makecurrent_fail = env_int("EXPECT_MAKECURRENT_FAIL", 0);
+    const int expect_app_rotation = (expect_panel_prop - expect_rotation + 360) % 360;
     const int swaps_axes = expect_rotation == 90 || expect_rotation == 270;
     const int lw = swaps_axes ? FAKE_KMS_PANEL_H : FAKE_KMS_PANEL_W;
     const int lh = swaps_axes ? FAKE_KMS_PANEL_W : FAKE_KMS_PANEL_H;
@@ -103,7 +115,7 @@ int main(void)
     PFNGLCLEARCOLORPROC glClearColorFn;
     PFNGLVIEWPORTPROC glViewportFn;
     int i, w = 0, h = 0, app_surface, alive = 0, locked = 0;
-    long long panel_prop, present_prop;
+    long long panel_prop, present_prop, window_present, window_app;
 
     fake = dlopen("libdrm.so.2", RTLD_NOW | RTLD_LOCAL);
     get_report = fake ? (FakeKmsGetReportFn)dlsym(fake, "fake_kms_get_report") : NULL;
@@ -128,9 +140,34 @@ int main(void)
     display_props = SDL_GetDisplayProperties(display);
     panel_prop = (long long)SDL_GetNumberProperty(display_props, SDL_PROP_DISPLAY_KMSDRM_PANEL_ORIENTATION_NUMBER, -1);
     present_prop = (long long)SDL_GetNumberProperty(display_props, "SDL.display.KMSDRM.pocketforge.present_rotation", -1);
-    CHECK(panel_prop == expect_panel_prop, "panel_orientation property %lld (the rotation left to the application), expected %d",
+    CHECK(panel_prop == expect_panel_prop, "display panel_orientation property %lld (the true panel orientation), expected %d",
           panel_prop, expect_panel_prop);
-    CHECK(present_prop == expect_rotation, "present_rotation property %lld, expected %d", present_prop, expect_rotation);
+    CHECK(present_prop == expect_rotation, "display present_rotation property %lld, expected %d", present_prop, expect_rotation);
+
+    if (expect_vulkan_window) {
+        window = SDL_CreateWindow("kmsdrm-rotation-vulkan", lw, lh, SDL_WINDOW_VULKAN);
+        CHECK(window != NULL, "Vulkan window created (%s)", window ? "ok" : SDL_GetError());
+        CHECK(report->vulkan_enumerations > 0, "SDL loaded Vulkan from the fake libvulkan.so.1 (%d enumerations)",
+              report->vulkan_enumerations);
+        if (window) {
+            SDL_PropertiesID props = SDL_GetWindowProperties(window);
+            window_present = (long long)SDL_GetNumberProperty(props, "SDL.window.KMSDRM.pocketforge.present_rotation", -1);
+            window_app = (long long)SDL_GetNumberProperty(props, "SDL.window.KMSDRM.pocketforge.app_rotation", -1);
+            CHECK(window_present == 0, "Vulkan window: SDL applies no rotation (window present_rotation %lld)", window_present);
+            CHECK(window_app == expect_panel_prop,
+                  "Vulkan window: the application owns the panel's %d degrees (window app_rotation %lld)",
+                  expect_panel_prop, window_app);
+            SDL_DestroyWindow(window);
+        }
+        CHECK(report->surfaces_created == 0 && report->contexts_created == 0,
+              "Vulkan window: no GBM surface (%d) or EGL context (%d) was made", report->surfaces_created,
+              report->contexts_created);
+        CHECK(report->errors == 0, "the fake display stack saw %d contract violations%s%s", report->errors,
+              report->errors ? "; first: " : "", report->first_error);
+        SDL_Quit();
+        printf("RESULT: %s\n", failures ? "FAIL" : "PASS");
+        return failures ? 1 : 0;
+    }
 
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
@@ -165,6 +202,15 @@ int main(void)
         printf("FAIL: SDL_CreateWindow: %s\n", SDL_GetError());
         return 1;
     }
+    {
+        SDL_PropertiesID props = SDL_GetWindowProperties(window);
+        window_present = (long long)SDL_GetNumberProperty(props, "SDL.window.KMSDRM.pocketforge.present_rotation", -1);
+        window_app = (long long)SDL_GetNumberProperty(props, "SDL.window.KMSDRM.pocketforge.app_rotation", -1);
+        CHECK(window_present == expect_rotation, "GL window: window present_rotation %lld, expected %d", window_present,
+              expect_rotation);
+        CHECK(window_app == expect_app_rotation, "GL window: window app_rotation %lld, expected %d", window_app,
+              expect_app_rotation);
+    }
     context = SDL_GL_CreateContext(window);
     if (!context || !SDL_GL_MakeCurrent(window, context)) {
         printf("FAIL: GL context: %s\n", SDL_GetError());
@@ -176,6 +222,47 @@ int main(void)
     if (!glClearFn || !glClearColorFn || !glViewportFn) {
         printf("FAIL: GL entry points\n");
         return 1;
+    }
+
+    if (expect_makecurrent_fail) {
+        bool ok;
+        int egl_alive, contexts_besides_app;
+        glViewportFn(0, 0, lw, lh);
+        glClearFn(GL_COLOR_BUFFER_BIT);
+        ok = SDL_GL_SwapWindow(window);
+        printf("frame 1: SDL_GL_SwapWindow %s (%s)\n", ok ? "succeeded" : "failed", ok ? "" : SDL_GetError());
+        CHECK(report->injected_makecurrent_failures == 1,
+              "the final eglMakeCurrent of the frame-1 surface rebuild failed (%d injected failures)",
+              report->injected_makecurrent_failures);
+        CHECK(!ok, "the failed surface rebuild fails the swap");
+        for (i = 0; i < report->surfaces_created; ++i) {
+            alive += report->surfaces[i].alive;
+            locked += report->surfaces[i].locked_now;
+        }
+        egl_alive = report->egl_surfaces_alive;
+        contexts_besides_app = report->contexts_alive - 1;
+        CHECK(alive == 0 && locked == 0 && egl_alive == 0 && contexts_besides_app == 0 && report->images_alive == 0 &&
+                  report->syncs_alive == 0,
+              "after the failed surface rebuild: nothing leaked (%d GBM surfaces, %d locked buffers, %d EGL surfaces, "
+              "%d contexts besides the application's, %d images, %d syncs alive)",
+              alive, locked, egl_alive, contexts_besides_app, report->images_alive, report->syncs_alive);
+        CHECK(report->errors == 0, "the fake display stack saw %d contract violations%s%s", report->errors,
+              report->errors ? "; first: " : "", report->first_error);
+        SDL_GL_DestroyContext(context);
+        SDL_DestroyWindow(window);
+        alive = locked = 0;
+        for (i = 0; i < report->surfaces_created; ++i) {
+            alive += report->surfaces[i].alive;
+            locked += report->surfaces[i].locked_now;
+        }
+        CHECK(alive == 0 && locked == 0 && report->egl_surfaces_alive == 0 && report->contexts_alive == 0,
+              "teardown: no GBM surface (%d), locked buffer (%d), EGL surface (%d) or context (%d) alive", alive, locked,
+              report->egl_surfaces_alive, report->contexts_alive);
+        CHECK(report->errors == 0, "teardown: %d contract violations%s%s", report->errors,
+              report->errors ? "; first: " : "", report->first_error);
+        SDL_Quit();
+        printf("RESULT: %s\n", failures ? "FAIL" : "PASS");
+        return failures ? 1 : 0;
     }
 
     for (i = 1; i <= frames; ++i) {
@@ -283,6 +370,7 @@ int main(void)
         locked += report->surfaces[i].locked_now;
     }
     CHECK(alive == 0 && locked == 0, "teardown: no GBM surface alive (%d) and no buffer locked (%d)", alive, locked);
+    CHECK(report->egl_surfaces_alive == 0, "teardown: no EGL surface alive (%d)", report->egl_surfaces_alive);
     CHECK(report->contexts_alive == 0, "teardown: no EGL context alive (%d)", report->contexts_alive);
     CHECK(report->images_alive == 0, "teardown: no EGLImage alive (%d)", report->images_alive);
     CHECK(report->errors == 0, "teardown: %d contract violations%s%s", report->errors,

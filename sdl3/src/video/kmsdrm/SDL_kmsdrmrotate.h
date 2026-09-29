@@ -32,13 +32,34 @@
 
 #include "SDL_kmsdrmvideo.h"
 
+/* Orientation contract (degrees, the convention of
+   SDL_PROP_DISPLAY_KMSDRM_PANEL_ORIENTATION_NUMBER):
+
+   - SDL_PROP_DISPLAY_KMSDRM_PANEL_ORIENTATION_NUMBER (display): the connector's
+     "panel orientation", always the true value. It is a fact about the panel,
+     it exists before any window, and it is what a Vulkan application needs:
+     Vulkan display-plane surfaces stay panel-native.
+   - SDL_PROP_DISPLAY_KMSDRM_PRESENT_ROTATION_NUMBER (display): the rotation
+     this backend applies when it presents a GL window on this display (0 when
+     SDL_KMSDRM_PRESENT_ROTATION is "0").
+   - SDL_PROP_WINDOW_KMSDRM_PRESENT_ROTATION_NUMBER (window): the rotation SDL
+     applies to this window: the display's present rotation for a GL (or
+     SDL_Renderer) window, 0 for a Vulkan window.
+   - SDL_PROP_WINDOW_KMSDRM_APP_ROTATION_NUMBER (window): the rotation the
+     application still owns for this window, i.e. panel orientation minus the
+     window's present rotation (mod 360): 0 for a GL window SDL rotates, the
+     panel orientation for a Vulkan window or an opted-out GL window. This is
+     the value to honour; applying the display's panel orientation to a GL
+     window SDL already rotates would rotate it twice. */
+
 // Hint (and environment variable) to turn the rotated present off. "0" makes
-// the backend report the panel's native size and the true orientation, and
-// leaves the transformation to the application.
+// the backend report the panel's native size and leaves the transformation to
+// the application (window app_rotation = panel orientation).
 #define SDL_HINT_KMSDRM_PRESENT_ROTATION "SDL_KMSDRM_PRESENT_ROTATION"
 
-// Display property: the rotation (degrees) the backend applies at present.
 #define SDL_PROP_DISPLAY_KMSDRM_PRESENT_ROTATION_NUMBER "SDL.display.KMSDRM.pocketforge.present_rotation"
+#define SDL_PROP_WINDOW_KMSDRM_PRESENT_ROTATION_NUMBER  "SDL.window.KMSDRM.pocketforge.present_rotation"
+#define SDL_PROP_WINDOW_KMSDRM_APP_ROTATION_NUMBER      "SDL.window.KMSDRM.pocketforge.app_rotation"
 
 // Creates the present surface and rotate context for a window whose display
 // needs `rotation`. pw x ph is the panel-native mode size. Restores no context.
