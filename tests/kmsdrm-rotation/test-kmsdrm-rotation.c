@@ -20,6 +20,11 @@
  *                      -DFAKE_KMS_OMIT_GL_LINK_PROGRAM), so creating the GL
  *                      window must fail cleanly: no call through a missing
  *                      entry point, and nothing left alive or locked
+ *   EXPECT_EXPERIMENT  tsp-mc9m.41.924.16.13.3: the SDL_KMSDRM_ROTATE_EXPERIMENT
+ *                      pass run.sh selected (sample0, clear, loadclear or
+ *                      twiddle); unset or empty: the ordinary pass, which must
+ *                      not touch the experiments' entry points at all (also
+ *                      for an unknown experiment name, which SDL ignores)
  *   FAKE_KMS_ATOMIC, FAKE_EGL_FENCE_SYNC, FAKE_EGL_NATIVE_FENCE,
  *   FAKE_KMS_FLIP_MS   (read by the fake too). With FAKE_KMS_FLIP_MS > 0 every
  *                      flip completes that long after its commit, and SDL must
@@ -73,6 +78,7 @@ static int env_int(const char *name, int fallback)
    so the landscape top-left is at the panel's top-right. */
 static const float *expected_uv(int rotation)
 {
+    static const float uv0[8] = { 0, 0, 0, 1, 1, 0, 1, 1 };
     static const float uv90[8] = { 1, 0, 0, 0, 1, 1, 0, 1 };
     static const float uv180[8] = { 1, 1, 1, 0, 0, 1, 0, 0 };
     static const float uv270[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };
@@ -83,6 +89,8 @@ static const float *expected_uv(int rotation)
         return uv180;
     case 270:
         return uv270;
+    case -1: // the sample0 experiment: the 0-degree quad on a rotated panel
+        return uv0;
     default:
         return NULL;
     }
@@ -105,6 +113,12 @@ int main(void)
     const int expect_window_fail = env_int("EXPECT_WINDOW_FAIL", 0);
     const int expect_vulkan_window = env_int("EXPECT_VULKAN_WINDOW", 0);
     const int expect_makecurrent_fail = env_int("EXPECT_MAKECURRENT_FAIL", 0);
+    const char *experiment = getenv("EXPECT_EXPERIMENT") ? getenv("EXPECT_EXPERIMENT") : "";
+    const int exp_sample0 = strcmp(experiment, "sample0") == 0;
+    const int exp_clear = strcmp(experiment, "clear") == 0;
+    const int exp_loadclear = strcmp(experiment, "loadclear") == 0;
+    const int exp_twiddle = strcmp(experiment, "twiddle") == 0;
+    const int exp_any = exp_sample0 || exp_clear || exp_loadclear || exp_twiddle;
     const int expect_app_rotation = (expect_panel_prop - expect_rotation + 360) % 360;
     const int swaps_axes = expect_rotation == 90 || expect_rotation == 270;
     const int lw = swaps_axes ? FAKE_KMS_PANEL_H : FAKE_KMS_PANEL_W;
@@ -320,10 +334,21 @@ int main(void)
         alive += report->surfaces[i].alive;
     }
 
-    if (expect_rotation != 0) {
+    if (expect_rotation != 0 && exp_clear) {
+        const int present = report->scanout_surface;
+        CHECK(present >= 0 && present != app_surface && report->surfaces[present].w == FAKE_KMS_PANEL_W &&
+                  report->surfaces[present].h == FAKE_KMS_PANEL_H,
+              "clear experiment: the panel still scans out the 720x1280 present surface");
+        CHECK(report->draws == 0, "clear experiment: no textured draw (%d)", report->draws);
+        CHECK(present >= 0 && report->surfaces[present].clears >= frames - 2,
+              "clear experiment: the present surface is cleared every frame (%d clears)",
+              present >= 0 ? report->surfaces[present].clears : -1);
+        CHECK(report->contexts_alive == 2, "clear experiment: application context plus one rotate context (%d)",
+              report->contexts_alive);
+    } else if (expect_rotation != 0) {
         const FakeKmsDraw *draw = &report->last_draw;
         const int present = report->scanout_surface;
-        const float *uv = expected_uv(expect_rotation);
+        const float *uv = expected_uv(exp_sample0 ? -1 : expect_rotation);
         int j, uv_ok = 1, tl_corner = -1;
 
         CHECK(alive == 2, "two GBM surfaces are alive: the application's and the panel-native present surface (%d)", alive);
@@ -354,10 +379,25 @@ int main(void)
                 tl_corner = j;
             }
         }
-        CHECK(uv_ok, "rotation %d: panel corners sample landscape (%.0f,%.0f) (%.0f,%.0f) (%.0f,%.0f) (%.0f,%.0f); "
+        CHECK(uv_ok, "rotation %d%s: panel corners sample landscape (%.0f,%.0f) (%.0f,%.0f) (%.0f,%.0f) (%.0f,%.0f); "
                      "the landscape top-left lands at the panel's %s corner",
-              expect_rotation, draw->uv[0], draw->uv[1], draw->uv[2], draw->uv[3], draw->uv[4], draw->uv[5],
-              draw->uv[6], draw->uv[7], corner_name(tl_corner));
+              expect_rotation, exp_sample0 ? " (sample0 experiment: the 0-degree quad)" : "", draw->uv[0], draw->uv[1],
+              draw->uv[2], draw->uv[3], draw->uv[4], draw->uv[5], draw->uv[6], draw->uv[7], corner_name(tl_corner));
+        if (exp_twiddle) {
+            CHECK(report->copies >= report->draws,
+                  "twiddle experiment: every pass samples a copy of the frame (%d copies, %d passes)",
+                  report->copies, report->draws);
+        } else {
+            CHECK(report->copies == 0, "no copy of the frame is made (%d)", report->copies);
+        }
+        if (exp_loadclear) {
+            CHECK(report->surfaces[present].clears >= report->draws,
+                  "loadclear experiment: the present surface is cleared before every pass (%d clears, %d passes)",
+                  report->surfaces[present].clears, report->draws);
+        } else {
+            CHECK(report->surfaces[present].clears == 0, "the rotate pass does not clear the present surface (%d)",
+                  report->surfaces[present].clears);
+        }
         CHECK(draw->pos[0] == -1.0f && draw->pos[1] == 1.0f && draw->pos[6] == 1.0f && draw->pos[7] == -1.0f,
               "the pass strip spans clip space from the panel's top-left to its bottom-right");
         CHECK(report->surfaces[app_surface].locked_max <= 2,
@@ -373,6 +413,14 @@ int main(void)
         CHECK(report->contexts_alive == 1, "negative control: no rotate context (%d contexts)", report->contexts_alive);
         CHECK(report->images_created == 0, "negative control: no EGLImages (%d)", report->images_created);
         CHECK(report->draws == 0, "negative control: no rotate pass (%d)", report->draws);
+    }
+    if (exp_any && expect_rotation != 0) {
+        CHECK(report->experiment_proc_requests > 0, "the %s experiment resolved its entry points (%d lookups)",
+              experiment, report->experiment_proc_requests);
+    } else {
+        CHECK(report->experiment_proc_requests == 0,
+              "no experiment: the experiments' entry points are never looked up (%d lookups)",
+              report->experiment_proc_requests);
     }
     CHECK(report->errors == 0, "the fake display stack saw %d contract violations%s%s", report->errors,
           report->errors ? "; first: " : "", report->first_error);

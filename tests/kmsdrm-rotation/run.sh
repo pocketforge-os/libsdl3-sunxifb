@@ -24,11 +24,18 @@
 #   5. red       the MakeCurrent-failure scenario on a71a8dab, the commit before
 #                the surface-rebuild cleanup fix, must fail on its leak
 #                (skipped when that commit is not in the checkout).
+#                The same app also runs every SDL_KMSDRM_ROTATE_EXPERIMENT pass
+#                (tsp-mc9m.41.924.16.13.3): each must say it is on, keep the
+#                present path working, and do what it names; an unknown name is
+#                ignored, and without one no experiment entry point is touched;
 #   6. red       with flips that take time to complete (FAKE_KMS_FLIP_MS), the
 #                base commit's SDL must hit -EBUSY on a nonblocking commit,
 #                because its wait for the previous flip is an EGL fence wait
 #                that returns at once on Zink (tsp-mc9m.41.924.16.13; skipped
 #                once the base waits on the OUT_FENCE itself).
+#   7. red       the base commit's SDL must fail the twiddle experiment
+#                scenario: it has no experiments, so no witness line and no
+#                copy (tsp-mc9m.41.924.16.13.3; skipped once the base has them).
 set -euo pipefail
 
 SRC=${SRC:-/src}
@@ -141,6 +148,8 @@ run_case() {
         FAKE_EGL_FAIL_MAKECURRENT_SURFACE="${FAKE_EGL_FAIL_MAKECURRENT_SURFACE:-}" \
         FAKE_KMS_FLIP_MS="${FAKE_KMS_FLIP_MS:-}" \
         SDL_KMSDRM_PRESENT_TIMING="${SDL_KMSDRM_PRESENT_TIMING:-}" \
+        SDL_KMSDRM_ROTATE_EXPERIMENT="${SDL_KMSDRM_ROTATE_EXPERIMENT:-}" \
+        EXPECT_EXPERIMENT="${EXPECT_EXPERIMENT:-}" \
         FAKE_KMS_PANEL_ORIENTATION="$orientation" FAKE_KMS_ATOMIC="$atomic" \
         FAKE_EGL_NATIVE_FENCE="$native" FAKE_EGL_FENCE_SYNC="$fences" \
         EXPECT_ROTATION="$rotation" EXPECT_PANEL_PROP="$panel" \
@@ -280,6 +289,69 @@ for name in lsu-fenced normal-fenced flip-lsu-double; do
     fi
 done
 
+# tsp-mc9m.41.924.16.13.3: the SDL_KMSDRM_ROTATE_EXPERIMENT device arms. Each
+# must print its witness line, keep every frame presenting through the ordinary
+# swap path, and do what its name says (test-kmsdrm-rotation.c checks the
+# draw, copy and clear counts). The llvmpipe step checks their pixels.
+experiment_case() {  # name experiment orientation rotation [flip_ms timing]
+    local name=$1 experiment=$2 orientation=$3 rotation=$4 flip=${5:-} timing=${6:-}
+    SDL_KMSDRM_ROTATE_EXPERIMENT="$experiment" EXPECT_EXPERIMENT="$experiment" \
+        FAKE_KMS_FLIP_MS="$flip" SDL_KMSDRM_PRESENT_TIMING="$timing" \
+        run_case "$name" head "$orientation" 1 1 1 "" "$rotation" "$rotation"
+}
+# One witness line per rotate-pass setup (the frame-1 surface rebuild makes a
+# second one), every one naming that experiment.
+witness() {  # case experiment
+    local name=$1 experiment=$2 lines named
+    lines=$(grep -cE '^KMSDRM rotated present experiment: ' "$WORK/case-$name.log" || true)
+    named=$(grep -cx "KMSDRM rotated present experiment: $experiment" "$WORK/case-$name.log" || true)
+    if [ "$lines" -lt 1 ] || [ "$named" != "$lines" ]; then
+        echo "FAIL: $name: expected only 'KMSDRM rotated present experiment: $experiment' witness lines, found $named of $lines"
+        return 1
+    fi
+    echo "ok: $name: $lines witness line(s) for $experiment"
+}
+for spec in "exp-sample0-rsu|sample0|Right Side Up|270" "exp-clear-rsu|clear|Right Side Up|270" \
+            "exp-loadclear-lsu|loadclear|Left Side Up|90" "exp-twiddle-rsu|twiddle|Right Side Up|270" \
+            "exp-twiddle-lsu|twiddle|Left Side Up|90"; do
+    IFS='|' read -r name experiment orientation rotation <<<"$spec"
+    if ! { experiment_case "$name" "$experiment" "$orientation" "$rotation" && witness "$name" "$experiment"; }; then
+        failed+=("$name")
+        sed 's/^/    /' "$WORK/case-$name.log"
+    fi
+done
+# The arms as the bench runs them: flips that take time, level-2 timing.
+for experiment in sample0 clear loadclear twiddle; do
+    name=exp-$experiment-flip-t2
+    if ! { experiment_case "$name" "$experiment" "Right Side Up" 270 4 2 && witness "$name" "$experiment" &&
+           check_timing "$name" 2 270 0 frame app app_swap app_gpu rotate rotate_gpu present flip_wait end; }; then
+        failed+=("$name")
+        sed 's/^/    /' "$WORK/case-$name.log"
+    fi
+done
+# An unknown name is ignored (said once), and the ordinary pass runs untouched.
+if ! { SDL_KMSDRM_ROTATE_EXPERIMENT=bogus run_case exp-unknown head "Right Side Up" 1 1 1 "" 270 270 &&
+       grep -q "KMSDRM rotated present: ignoring unknown SDL_KMSDRM_ROTATE_EXPERIMENT 'bogus'" "$WORK/case-exp-unknown.log" &&
+       ! grep -q '^KMSDRM rotated present experiment: ' "$WORK/case-exp-unknown.log"; }; then
+    echo "FAIL: exp-unknown: an unknown experiment must be ignored with a warning and no witness"
+    failed+=(exp-unknown)
+    sed 's/^/    /' "$WORK/case-exp-unknown.log"
+fi
+# A panel that needs no rotation has no rotate pass, so no experiment applies.
+if ! { SDL_KMSDRM_ROTATE_EXPERIMENT=twiddle run_case exp-twiddle-normal head Normal 1 1 1 "" 0 0 &&
+       ! grep -q 'KMSDRM rotated present experiment' "$WORK/case-exp-twiddle-normal.log"; }; then
+    echo "FAIL: exp-twiddle-normal: an experiment on a Normal panel must change nothing"
+    failed+=(exp-twiddle-normal)
+    sed 's/^/    /' "$WORK/case-exp-twiddle-normal.log"
+fi
+# Without the variable no witness appears anywhere.
+for name in lsu-fenced rsu-fenced flip-rsu-fenced-t2; do
+    if grep -q 'KMSDRM rotated present experiment' "$WORK/case-$name.log"; then
+        echo "FAIL: $name: an experiment line without SDL_KMSDRM_ROTATE_EXPERIMENT"
+        failed+=("$name-experiment-off")
+    fi
+done
+
 if [ "${#failed[@]}" -ne 0 ]; then
     echo "FAIL: backend scenarios: ${failed[*]}" >&2
     exit 1
@@ -361,6 +433,30 @@ else
         fi
         echo "ok: $name: the base SDL's next nonblocking commit reaches a pending flip (-EBUSY), the defect fixed here"
     done
+fi
+
+step "7. red: the base commit's SDL has no rotate-pass experiments"
+if [ -z "$BASE_SHA" ] || ! git -C "$SRC" cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+    echo "SKIP: no base commit given (BASE_SHA)"
+elif git -C "$SRC" show "$BASE_SHA:sdl3/src/video/kmsdrm/SDL_kmsdrmrotategl.h" 2>/dev/null | grep -q SDL_KMSDRM_ROTATE_EXPERIMENT; then
+    echo "SKIP: base $BASE_SHA already has the experiments"
+else
+    if [ ! -d "$WORK/prefix-base" ]; then
+        mkdir -p "$WORK/base-src"
+        git -C "$SRC" archive "$BASE_SHA" sdl3 | tar -x -C "$WORK/base-src"
+        build_sdl "$WORK/base-src" base
+    fi
+    if SDL_KMSDRM_ROTATE_EXPERIMENT=twiddle EXPECT_EXPERIMENT=twiddle \
+        run_case base-exp-twiddle-rsu base "Right Side Up" 1 1 1 "" 270 270 && witness base-exp-twiddle-rsu twiddle; then
+        echo "FAIL: the base SDL passed the twiddle experiment scenario; the test does not detect a missing experiment" >&2
+        exit 1
+    fi
+    if ! grep -qE 'FAIL: twiddle experiment: every pass samples a copy of the frame \(0 copies' "$WORK/case-base-exp-twiddle-rsu.log"; then
+        echo "FAIL: the base SDL failed the twiddle scenario, but not for want of the copy:" >&2
+        sed 's/^/    /' "$WORK/case-base-exp-twiddle-rsu.log" >&2
+        exit 1
+    fi
+    echo "ok: the base SDL ignores SDL_KMSDRM_ROTATE_EXPERIMENT=twiddle (no copy, no witness): the arm needs this change"
 fi
 
 step "RESULT: PASS"

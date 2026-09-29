@@ -1203,6 +1203,12 @@ typedef struct FakeTexture
     FakeImage *image;
 } FakeTexture;
 
+typedef struct FakeFramebuffer
+{
+    GLuint name;
+    GLuint texture; // colour attachment 0 (a texture name), 0 for none
+} FakeFramebuffer;
+
 typedef struct FakeContext
 {
     int alive;
@@ -1211,6 +1217,9 @@ typedef struct FakeContext
     FakeTexture textures[32];
     int num_textures;
     GLuint bound_texture;
+    FakeFramebuffer framebuffers[16];
+    int num_framebuffers;
+    GLuint bound_framebuffer; // 0: the current draw surface
     GLint viewport[4];
     const void *attrib[2];
     GLuint program;
@@ -1708,7 +1717,14 @@ static FakeTexture *find_texture(FakeContext *ctx, GLuint name)
 FAKE_EXPORT void glActiveTexture(GLenum texture) { (void)texture; gl_ctx("glActiveTexture"); }
 FAKE_EXPORT void glAttachShader(GLuint program, GLuint shader) { (void)program; (void)shader; gl_ctx("glAttachShader"); }
 FAKE_EXPORT void glBindAttribLocation(GLuint program, GLuint index, const GLchar *name) { (void)program; (void)index; (void)name; gl_ctx("glBindAttribLocation"); }
-FAKE_EXPORT void glClear(GLbitfield mask) { (void)mask; gl_ctx("glClear"); }
+FAKE_EXPORT void glClear(GLbitfield mask)
+{
+    FakeContext *ctx = gl_ctx("glClear");
+    (void)mask;
+    if (ctx && !ctx->bound_framebuffer && g_draw && g_draw->gs) {
+        g_report.surfaces[g_draw->gs->index].clears++;
+    }
+}
 FAKE_EXPORT void glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { (void)r; (void)g; (void)b; (void)a; gl_ctx("glClearColor"); }
 FAKE_EXPORT void glCompileShader(GLuint shader) { (void)shader; gl_ctx("glCompileShader"); }
 FAKE_EXPORT void glDeleteProgram(GLuint program) { (void)program; gl_ctx("glDeleteProgram"); }
@@ -1865,6 +1881,132 @@ FAKE_EXPORT void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GL
     ctx->attrib[index] = pointer;
 }
 
+static FakeFramebuffer *find_framebuffer(FakeContext *ctx, GLuint name)
+{
+    int i;
+    for (i = 0; name && i < ctx->num_framebuffers; ++i) {
+        if (ctx->framebuffers[i].name == name) {
+            return &ctx->framebuffers[i];
+        }
+    }
+    return NULL;
+}
+
+FAKE_EXPORT void glGenFramebuffers(GLsizei n, GLuint *framebuffers)
+{
+    FakeContext *ctx = gl_ctx("glGenFramebuffers");
+    GLsizei i;
+    for (i = 0; i < n; ++i) {
+        framebuffers[i] = 0;
+        if (ctx && ctx->num_framebuffers < (int)(sizeof(ctx->framebuffers) / sizeof(ctx->framebuffers[0]))) {
+            ctx->framebuffers[ctx->num_framebuffers].name = ctx->next_name++;
+            ctx->framebuffers[ctx->num_framebuffers].texture = 0;
+            framebuffers[i] = ctx->framebuffers[ctx->num_framebuffers].name;
+            ctx->num_framebuffers++;
+        }
+    }
+}
+
+FAKE_EXPORT void glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers)
+{
+    FakeContext *ctx = gl_ctx("glDeleteFramebuffers");
+    GLsizei i;
+    for (i = 0; ctx && i < n; ++i) {
+        FakeFramebuffer *fb = find_framebuffer(ctx, framebuffers[i]);
+        if (fb) {
+            if (ctx->bound_framebuffer == fb->name) {
+                ctx->bound_framebuffer = 0;
+            }
+            fb->name = 0;
+            fb->texture = 0;
+        }
+    }
+}
+
+FAKE_EXPORT void glBindFramebuffer(GLenum target, GLuint framebuffer)
+{
+    FakeContext *ctx = gl_ctx("glBindFramebuffer");
+    if (!ctx) {
+        return;
+    }
+    if (target != GL_FRAMEBUFFER || (framebuffer && !find_framebuffer(ctx, framebuffer))) {
+        fake_error("glBindFramebuffer(0x%x, %u): not a framebuffer of this context", target, framebuffer);
+        return;
+    }
+    ctx->bound_framebuffer = framebuffer;
+}
+
+FAKE_EXPORT void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level)
+{
+    FakeContext *ctx = gl_ctx("glFramebufferTexture2D");
+    FakeFramebuffer *fb;
+    if (!ctx) {
+        return;
+    }
+    fb = find_framebuffer(ctx, ctx->bound_framebuffer);
+    if (target != GL_FRAMEBUFFER || attachment != GL_COLOR_ATTACHMENT0 || textarget != GL_TEXTURE_2D || level != 0 ||
+        !fb || !find_texture(ctx, texture)) {
+        fake_error("glFramebufferTexture2D: the fake models a 2D texture on colour attachment 0 of a bound framebuffer");
+        return;
+    }
+    fb->texture = texture;
+}
+
+FAKE_EXPORT GLenum glCheckFramebufferStatus(GLenum target)
+{
+    FakeContext *ctx = gl_ctx("glCheckFramebufferStatus");
+    FakeFramebuffer *fb;
+    FakeTexture *tex;
+    if (!ctx || target != GL_FRAMEBUFFER) {
+        return 0;
+    }
+    fb = find_framebuffer(ctx, ctx->bound_framebuffer);
+    tex = fb ? find_texture(ctx, fb->texture) : NULL;
+    return (tex && tex->image) ? GL_FRAMEBUFFER_COMPLETE : GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+}
+
+FAKE_EXPORT void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height,
+                              GLint border, GLenum format, GLenum type, const void *pixels)
+{
+    FakeContext *ctx = gl_ctx("glTexImage2D");
+    FakeTexture *tex;
+    (void)internalformat;
+    (void)format;
+    (void)type;
+    if (!ctx) {
+        return;
+    }
+    tex = find_texture(ctx, ctx->bound_texture);
+    if (target != GL_TEXTURE_2D || level != 0 || border != 0 || width <= 0 || height <= 0 || pixels || !tex) {
+        fake_error("glTexImage2D: the fake models storage (no pixels) for a bound 2D texture");
+        return;
+    }
+    tex->image = NULL; // plain storage, not an EGLImage
+}
+
+/* The read framebuffer's image becomes what the bound texture samples: a model
+   of copying the application's frame into a texture the rotate context owns. */
+FAKE_EXPORT void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y,
+                                     GLsizei width, GLsizei height)
+{
+    FakeContext *ctx = gl_ctx("glCopyTexSubImage2D");
+    FakeFramebuffer *fb;
+    FakeTexture *src, *dst;
+    if (!ctx) {
+        return;
+    }
+    fb = find_framebuffer(ctx, ctx->bound_framebuffer);
+    src = fb ? find_texture(ctx, fb->texture) : NULL;
+    dst = find_texture(ctx, ctx->bound_texture);
+    if (target != GL_TEXTURE_2D || level != 0 || xoffset || yoffset || x || y || !src || !src->image || !dst ||
+        dst == src || width != (GLsizei)src->image->bo->w || height != (GLsizei)src->image->bo->h) {
+        fake_error("glCopyTexSubImage2D: the fake models a whole-image copy from a bound framebuffer's EGLImage");
+        return;
+    }
+    dst->image = src->image;
+    g_report.copies++;
+}
+
 FAKE_EXPORT void glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
     FakeContext *ctx = gl_ctx("glDrawArrays");
@@ -1872,6 +2014,11 @@ FAKE_EXPORT void glDrawArrays(GLenum mode, GLint first, GLsizei count)
     FakeKmsDraw *draw = &g_report.last_draw;
 
     if (!ctx) {
+        return;
+    }
+    if (ctx->bound_framebuffer) {
+        fake_error("glDrawArrays with framebuffer object %u bound: the rotate pass must draw into the present surface",
+                   ctx->bound_framebuffer);
         return;
     }
     tex = find_texture(ctx, ctx->bound_texture);
@@ -1971,7 +2118,26 @@ static const struct
     FAKE_PROC(glPixelStorei), FAKE_PROC(glShaderSource), FAKE_PROC(glTexParameteri),
     FAKE_PROC(glUniform1i), FAKE_PROC(glUseProgram), FAKE_PROC(glVertexAttribPointer), FAKE_PROC(glViewport),
     FAKE_PROC(glEGLImageTargetTexture2DOES),
+    FAKE_PROC(glBindFramebuffer), FAKE_PROC(glCheckFramebufferStatus), FAKE_PROC(glCopyTexSubImage2D),
+    FAKE_PROC(glDeleteFramebuffers), FAKE_PROC(glFramebufferTexture2D), FAKE_PROC(glGenFramebuffers),
+    FAKE_PROC(glTexImage2D),
 };
+
+// Entry points only an SDL_KMSDRM_ROTATE_EXPERIMENT resolves (glClear is also the application's).
+static int is_experiment_proc(const char *procname)
+{
+    static const char *const names[] = {
+        "glBindFramebuffer", "glCheckFramebufferStatus", "glCopyTexSubImage2D", "glDeleteFramebuffers",
+        "glFramebufferTexture2D", "glGenFramebuffers", "glTexImage2D"
+    };
+    size_t i;
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        if (strcmp(names[i], procname) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 FAKE_EXPORT __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *procname)
 {
@@ -1982,6 +2148,9 @@ FAKE_EXPORT __eglMustCastToProperFunctionPointerType eglGetProcAddress(const cha
         return NULL;
     }
 #endif
+    if (is_experiment_proc(procname)) {
+        g_report.experiment_proc_requests++;
+    }
     for (i = 0; i < sizeof(g_procs) / sizeof(g_procs[0]); ++i) {
         if (strcmp(g_procs[i].name, procname) == 0) {
             return (__eglMustCastToProperFunctionPointerType)g_procs[i].proc;

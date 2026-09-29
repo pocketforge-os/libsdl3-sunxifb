@@ -7,6 +7,11 @@
  * and every panel pixel is checked against pf-framehost's pixel table for the
  * same connector property, for 90 ("Left Side Up"), 270 ("Right Side Up"),
  * 180 ("Upside Down") and 0 ("Normal", the negative control).
+ *
+ * tsp-mc9m.41.924.16.13.3: the same check for every SDL_KMSDRM_ROTATE_EXPERIMENT
+ * pass. loadclear and twiddle must be the ordinary image, pixel for pixel;
+ * sample0 must be the unrotated, squeezed image; clear must be solid grey. The
+ * experiment names parse as documented and unknown names are refused.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -60,8 +65,32 @@ static uint32_t code_of(int lx, int ly)
     return (uint32_t)(ly * LW + lx) + 1u; // never 0 (black) or the magenta clear
 }
 
-static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation)
+/* sample0: the 0-degree quad over the panel. Pixel (x, y) is centred at
+   ((x + 0.5) / pw, (y + 0.5) / ph) and NEAREST picks the texel under it. The
+   interpolated coordinate can land exactly on a texel edge, so allow one texel
+   either way. */
+static int sample0_matches(int pw, int ph, int x, int y, uint32_t got)
 {
+    const int ex = (int)(((double)x + 0.5) * LW / pw);
+    const int ey = (int)(((double)y + 0.5) * LH / ph);
+    int dx, dy;
+
+    for (dy = -1; dy <= 1; ++dy) {
+        for (dx = -1; dx <= 1; ++dx) {
+            const int lx = ex + dx, ly = ey + dy;
+            if (lx >= 0 && lx < LW && ly >= 0 && ly < LH && got == code_of(lx, ly)) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation, KMSDRM_RotateExperiment experiment)
+{
+    const char *name = KMSDRM_RotateGL_ExperimentName(experiment);
+    KMSDRM_RotateGLExp exp = { 0 };
+    GLuint draw_texture, copy_texture = 0, read_fbo = 0;
     const int swaps = rotation == 90 || rotation == 270;
     const int pw = swaps ? LH : LW, ph = swaps ? LW : LH;
     const EGLint pbuffer_attribs[] = { EGL_WIDTH, pw, EGL_HEIGHT, ph, EGL_NONE };
@@ -79,7 +108,7 @@ static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation)
 
     surface = eglCreatePbufferSurface(dpy, config, pbuffer_attribs);
     if (surface == EGL_NO_SURFACE || !eglMakeCurrent(dpy, surface, surface, ctx)) {
-        printf("FAIL: rotation %d: no %dx%d pbuffer (EGL error 0x%x)\n", rotation, pw, ph, eglGetError());
+        printf("FAIL: rotation %d (%s): no %dx%d pbuffer (EGL error 0x%x)\n", rotation, name, pw, ph, eglGetError());
         return 1;
     }
     if (!TexImage2D || !ReadPixels || !PixelStorei || !ClearColor || !Clear ||
@@ -115,13 +144,34 @@ static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation)
 
     ClearColor(1.0f, 0.0f, 1.0f, 1.0f);
     Clear(GL_COLOR_BUFFER_BIT);
-    KMSDRM_RotateGL_Draw(&gl, texture, rotation, pw, ph);
+    draw_texture = texture;
+    if (experiment != KMSDRM_ROTATE_EXPERIMENT_NONE && !KMSDRM_RotateGL_LoadExp(&exp, load_proc, NULL)) {
+        printf("FAIL: rotation %d (%s): the experiment entry points are unavailable\n", rotation, name);
+        return 1;
+    }
+    if (experiment == KMSDRM_ROTATE_EXPERIMENT_TWIDDLE) {
+        // As the backend does: a copy texture, a read framebuffer on the source, a row-wise copy.
+        copy_texture = KMSDRM_RotateGL_CreateCopyTexture(&gl, &exp, LW, LH);
+        read_fbo = copy_texture ? KMSDRM_RotateGL_CreateReadFramebuffer(&gl, &exp, texture) : 0;
+        if (!copy_texture || !read_fbo || !KMSDRM_RotateGL_CopyToTexture(&gl, &exp, read_fbo, copy_texture, LW, LH)) {
+            printf("FAIL: rotation %d (twiddle): copy texture %u, read framebuffer %u, or the copy failed\n",
+                   rotation, copy_texture, read_fbo);
+            ++failures;
+        }
+        draw_texture = copy_texture;
+        // The source must no longer matter: scribble over it before the draw.
+        memset(src, 0, (size_t)LW * LH * 4);
+        gl.BindTexture(GL_TEXTURE_2D, texture);
+        TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, LW, LH, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
+    }
+    KMSDRM_RotateGL_DrawExperiment(&gl, experiment == KMSDRM_ROTATE_EXPERIMENT_NONE ? NULL : &exp, experiment,
+                                   draw_texture, rotation, pw, ph);
     gl.Finish();
     PixelStorei(GL_PACK_ALIGNMENT, 1);
     ReadPixels(0, 0, pw, ph, GL_RGBA, GL_UNSIGNED_BYTE, out);
     error = gl.GetError();
     if (error != GL_NO_ERROR) {
-        printf("FAIL: rotation %d: GL error 0x%x\n", rotation, error);
+        printf("FAIL: rotation %d (%s): GL error 0x%x\n", rotation, name, error);
         ++failures;
     }
 
@@ -130,12 +180,23 @@ static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation)
         for (x = 0; x < pw; ++x) {
             const unsigned char *p = &out[((size_t)(ph - 1 - y) * pw + x) * 4];
             const uint32_t got = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
-            int lx, ly;
+            int lx, ly, match;
             expected_source(rotation, x, y, &lx, &ly);
-            if (got != code_of(lx, ly) || p[3] != 0xff) {
+            switch (experiment) {
+            case KMSDRM_ROTATE_EXPERIMENT_CLEAR:
+                match = p[0] == 0x20 && p[1] == 0x20 && p[2] == 0x20;
+                break;
+            case KMSDRM_ROTATE_EXPERIMENT_SAMPLE0:
+                match = sample0_matches(pw, ph, x, y, got);
+                break;
+            default:
+                match = got == code_of(lx, ly);
+                break;
+            }
+            if (!match || p[3] != 0xff) {
                 if (mismatches < 5) {
-                    printf("  rotation %d: panel (%d,%d) shows code %u, expected landscape (%d,%d) code %u\n",
-                           rotation, x, y, got, lx, ly, code_of(lx, ly));
+                    printf("  rotation %d (%s): panel (%d,%d) shows code %u (rgba %u,%u,%u,%u); ordinary pass: landscape (%d,%d) code %u\n",
+                           rotation, name, x, y, got, p[0], p[1], p[2], p[3], lx, ly, code_of(lx, ly));
                 }
                 ++mismatches;
             }
@@ -145,9 +206,9 @@ static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation)
             }
         }
     }
-    printf("%s: rotation %d: %dx%d landscape -> %dx%d panel, %d of %d pixels mismatched; "
+    printf("%s: rotation %d (%s): %dx%d landscape -> %dx%d panel, %d of %d pixels mismatched; "
            "landscape top-left is at panel (%d,%d)\n",
-           mismatches ? "FAIL" : "ok", rotation, LW, LH, pw, ph, mismatches, pw * ph, tl_x, tl_y);
+           mismatches ? "FAIL" : "ok", rotation, name, LW, LH, pw, ph, mismatches, pw * ph, tl_x, tl_y);
     if (mismatches) {
         ++failures;
     }
@@ -155,12 +216,61 @@ static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation)
     if (texture) {
         gl.DeleteTextures(1, &texture);
     }
+    if (copy_texture) {
+        gl.DeleteTextures(1, &copy_texture);
+    }
+    if (read_fbo) {
+        PFNGLDELETEFRAMEBUFFERSPROC DeleteFramebuffers =
+            (PFNGLDELETEFRAMEBUFFERSPROC)eglGetProcAddress("glDeleteFramebuffers");
+        if (DeleteFramebuffers) {
+            DeleteFramebuffers(1, &read_fbo);
+        }
+    }
     KMSDRM_RotateGL_Fini(&gl);
     eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroySurface(dpy, surface);
     free(src);
     free(out);
     return 0;
+}
+
+// SDL_KMSDRM_ROTATE_EXPERIMENT values, as KMSDRM_RotateGL_ParseExperiment reads them.
+static void check_experiment_names(void)
+{
+    static const struct
+    {
+        const char *value;
+        KMSDRM_RotateExperiment experiment;
+        int recognised;
+    } table[] = {
+        { NULL, KMSDRM_ROTATE_EXPERIMENT_NONE, 1 },
+        { "", KMSDRM_ROTATE_EXPERIMENT_NONE, 1 },
+        { "sample0", KMSDRM_ROTATE_EXPERIMENT_SAMPLE0, 1 },
+        { "clear", KMSDRM_ROTATE_EXPERIMENT_CLEAR, 1 },
+        { "loadclear", KMSDRM_ROTATE_EXPERIMENT_LOADCLEAR, 1 },
+        { "twiddle", KMSDRM_ROTATE_EXPERIMENT_TWIDDLE, 1 },
+        { "Twiddle", KMSDRM_ROTATE_EXPERIMENT_NONE, 0 },
+        { "twiddle ", KMSDRM_ROTATE_EXPERIMENT_NONE, 0 },
+        { "clea", KMSDRM_ROTATE_EXPERIMENT_NONE, 0 },
+        { "none", KMSDRM_ROTATE_EXPERIMENT_NONE, 0 },
+        { "1", KMSDRM_ROTATE_EXPERIMENT_NONE, 0 },
+    };
+    size_t i;
+    int bad = 0;
+
+    for (i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
+        int recognised = -1;
+        const KMSDRM_RotateExperiment got = KMSDRM_RotateGL_ParseExperiment(table[i].value, &recognised);
+        if (got != table[i].experiment || recognised != table[i].recognised) {
+            printf("FAIL: SDL_KMSDRM_ROTATE_EXPERIMENT '%s' parsed as %s (recognised %d), expected %s (recognised %d)\n",
+                   table[i].value ? table[i].value : "(unset)", KMSDRM_RotateGL_ExperimentName(got), recognised,
+                   KMSDRM_RotateGL_ExperimentName(table[i].experiment), table[i].recognised);
+            ++bad;
+        }
+    }
+    printf("%s: %d SDL_KMSDRM_ROTATE_EXPERIMENT values parse as documented\n", bad ? "FAIL" : "ok",
+           (int)(sizeof(table) / sizeof(table[0])) - bad);
+    failures += bad;
 }
 
 int main(void)
@@ -173,6 +283,11 @@ int main(void)
     };
     static const EGLint context_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
     static const int rotations[] = { 90, 270, 180, 0 };
+    static const KMSDRM_RotateExperiment experiments[] = {
+        KMSDRM_ROTATE_EXPERIMENT_NONE, KMSDRM_ROTATE_EXPERIMENT_LOADCLEAR, KMSDRM_ROTATE_EXPERIMENT_TWIDDLE,
+        KMSDRM_ROTATE_EXPERIMENT_SAMPLE0, KMSDRM_ROTATE_EXPERIMENT_CLEAR
+    };
+    size_t e;
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_platform_display =
         (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
     EGLDisplay dpy;
@@ -198,9 +313,12 @@ int main(void)
     }
     printf("EGL vendor: %s\n", eglQueryString(dpy, EGL_VENDOR));
 
-    for (i = 0; i < sizeof(rotations) / sizeof(rotations[0]); ++i) {
-        if (run(dpy, config, ctx, rotations[i]) != 0) {
-            return 2;
+    check_experiment_names();
+    for (e = 0; e < sizeof(experiments) / sizeof(experiments[0]); ++e) {
+        for (i = 0; i < sizeof(rotations) / sizeof(rotations[0]); ++i) {
+            if (run(dpy, config, ctx, rotations[i], experiments[e]) != 0) {
+                return 2;
+            }
         }
     }
     eglDestroyContext(dpy, ctx);
