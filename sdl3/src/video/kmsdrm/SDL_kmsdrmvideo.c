@@ -527,7 +527,7 @@ int drm_atomic_commit(SDL_VideoDevice *_this, SDL_DisplayData *dispdata, bool bl
 {
     SDL_VideoData *viddata = ((SDL_VideoData *)_this->internal);
     uint32_t atomic_flags = 0;
-    int ret;
+    int ret, commit_errno;
 
     if (!blocking) {
         atomic_flags |= DRM_MODE_ATOMIC_NONBLOCK;
@@ -541,9 +541,11 @@ int drm_atomic_commit(SDL_VideoDevice *_this, SDL_DisplayData *dispdata, bool bl
        or it will error. */
     drm_atomic_waitpending(_this, dispdata);
 
+    errno = 0; // PocketForge: no stale errno may reach the classification below.
     ret = KMSDRM_drmModeAtomicCommit(viddata->drm_fd, dispdata->atomic_req,
               atomic_flags, NULL);
-    KMSDRM_Timing_CountCommit(dispdata->timing, ret);
+    commit_errno = errno; // Saved before any other call can overwrite it (SDL_kmsdrmcommit.h).
+    KMSDRM_Timing_CountCommit(dispdata->timing, ret, commit_errno);
 
     if (ret) {
         SDL_SetError("Atomic commit failed, returned %d.", ret);

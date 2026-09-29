@@ -71,8 +71,9 @@ extern void KMSDRM_Timing_Add(KMSDRM_Timing *timing, KMSDRM_TimingStage stage, U
 extern Uint64 KMSDRM_Timing_SwapStart(KMSDRM_Timing *timing);
 // The end of a present: records the frame stage.
 extern void KMSDRM_Timing_FrameDone(KMSDRM_Timing *timing);
-// The result of one atomic commit (0, -EBUSY, or another negative errno).
-extern void KMSDRM_Timing_CountCommit(KMSDRM_Timing *timing, int ret);
+// The result of one drmModeAtomicCommit(): its return value and errno as saved
+// immediately after the call (see SDL_kmsdrmcommit.h for the classification).
+extern void KMSDRM_Timing_CountCommit(KMSDRM_Timing *timing, int ret, int saved_errno);
 // Logs the summary if any frame was recorded, then starts over.
 extern void KMSDRM_Timing_Report(KMSDRM_Timing *timing, int rotation);
 

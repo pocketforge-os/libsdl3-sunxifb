@@ -23,8 +23,7 @@
 #ifdef SDL_VIDEO_DRIVER_KMSDRM
 
 #include "SDL_kmsdrmtiming.h"
-
-#include <errno.h>
+#include "SDL_kmsdrmcommit.h"
 
 // 0.1 ms buckets up to 250 ms; the last bucket collects everything longer.
 #define KMSDRM_TIMING_BUCKET_NS 100000
@@ -137,15 +136,20 @@ void KMSDRM_Timing_FrameDone(KMSDRM_Timing *timing)
     timing->last_frame_end_ns = now;
 }
 
-void KMSDRM_Timing_CountCommit(KMSDRM_Timing *timing, int ret)
+void KMSDRM_Timing_CountCommit(KMSDRM_Timing *timing, int ret, int saved_errno)
 {
-    if (!timing || ret == 0) {
+    if (!timing) {
         return;
     }
-    if (ret == -EBUSY) {
+    switch (KMSDRM_ClassifyCommit(ret, saved_errno)) {
+    case KMSDRM_COMMIT_BUSY:
         timing->commit_busy++;
-    } else {
+        break;
+    case KMSDRM_COMMIT_FAILED:
         timing->commit_fail++;
+        break;
+    default:
+        break;
     }
 }
 

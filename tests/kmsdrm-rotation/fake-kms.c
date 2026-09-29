@@ -1082,8 +1082,12 @@ FAKE_EXPORT int drmModeAtomicCommit(int fd, const drmModeAtomicReqPtr req, uint3
         if (flags & DRM_MODE_ATOMIC_NONBLOCK) {
             // drm_atomic_helper_setup_commit(): "Userspace is not allowed to
             // get ahead of the previous commit with nonblocking ones."
+            // Returned as real libdrm returns it: drmModeAtomicCommit() is
+            // DRM_IOCTL(), `ret < 0 ? -errno : ret` over drmIoctl(), so the
+            // result is -EBUSY and errno is left at EBUSY by the ioctl.
             g_report.busy_commits++;
             fake_error("nonblocking atomic commit while the previous flip is still pending (-EBUSY)");
+            errno = EBUSY;
             return -EBUSY;
         }
         g_report.blocking_stalls++;

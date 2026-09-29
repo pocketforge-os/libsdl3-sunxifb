@@ -8,7 +8,8 @@
 # run outside a container.
 #
 #   1. unit      SDL_kmsdrmorientation.h against the kernel names, pf-framehost's
-#                pixel table and the panel corners;
+#                pixel table and the panel corners; SDL_kmsdrmcommit.h, the
+#                busy/failed classification of an atomic commit result;
 #   2. llvmpipe  the rotate pass's real GLES2 code, every pixel, 90/270/180/0;
 #   3. backend   an SDL app on this tree's KMSDRM backend over fake-kms.c, for
 #                each present path (atomic fenced, atomic double-buffered,
@@ -53,6 +54,10 @@ step "1. unit: orientation map"
 cc "${STRICT[@]}" -I"$KMSDRM" -o "$WORK/test-orientation" "$T/test-orientation.c"
 "$WORK/test-orientation"
 
+step "1. unit: atomic commit result classification"
+cc "${STRICT[@]}" -I"$KMSDRM" -o "$WORK/test-commit-classify" "$T/test-commit-classify.c"
+"$WORK/test-commit-classify"
+
 step "2. llvmpipe: rotate pass pixels"
 cc "${STRICT[@]}" -I"$KMSDRM" -o "$WORK/test-rotategl" "$T/test-rotategl.c" -lEGL -lGLESv2
 LIBGL_ALWAYS_SOFTWARE=1 EGL_PLATFORM=surfaceless "$WORK/test-rotategl"
@@ -91,7 +96,7 @@ step "3. backend: build this tree's SDL"
 build_sdl "$SRC" head
 kmsdrm_warnings "$WORK/build-head.build.log" >"$WORK/warnings-head.txt"
 cat "$WORK/warnings-head.txt"
-if grep -qE 'SDL_kmsdrm(rotate|orientation|rotategl|timing)\.[ch]' "$WORK/warnings-head.txt"; then
+if grep -qE 'SDL_kmsdrm(rotate|orientation|rotategl|timing|commit)\.[ch]' "$WORK/warnings-head.txt"; then
     echo "FAIL: compiler warnings in the rotated-present or present-timing sources" >&2
     exit 1
 fi
