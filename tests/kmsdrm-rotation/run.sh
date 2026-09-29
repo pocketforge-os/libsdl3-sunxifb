@@ -23,6 +23,11 @@
 #   5. red       the MakeCurrent-failure scenario on a71a8dab, the commit before
 #                the surface-rebuild cleanup fix, must fail on its leak
 #                (skipped when that commit is not in the checkout).
+#   6. red       with flips that take time to complete (FAKE_KMS_FLIP_MS), the
+#                base commit's SDL must hit -EBUSY on a nonblocking commit,
+#                because its wait for the previous flip is an EGL fence wait
+#                that returns at once on Zink (tsp-mc9m.41.924.16.13; skipped
+#                once the base waits on the OUT_FENCE itself).
 set -euo pipefail
 
 SRC=${SRC:-/src}
@@ -86,8 +91,8 @@ step "3. backend: build this tree's SDL"
 build_sdl "$SRC" head
 kmsdrm_warnings "$WORK/build-head.build.log" >"$WORK/warnings-head.txt"
 cat "$WORK/warnings-head.txt"
-if grep -qE 'SDL_kmsdrm(rotate|orientation|rotategl)\.[ch]' "$WORK/warnings-head.txt"; then
-    echo "FAIL: compiler warnings in the rotated-present sources" >&2
+if grep -qE 'SDL_kmsdrm(rotate|orientation|rotategl|timing)\.[ch]' "$WORK/warnings-head.txt"; then
+    echo "FAIL: compiler warnings in the rotated-present or present-timing sources" >&2
     exit 1
 fi
 
@@ -117,8 +122,9 @@ mkdir -p /dev/dri
 
 failed=()
 # name, SDL prefix, orientation, atomic, native fence, fence sync, opt-out hint, expected rotation, expected panel property
-# (FAKE_DIR, EXPECT_WINDOW_FAIL, EXPECT_VULKAN_WINDOW, EXPECT_MAKECURRENT_FAIL and
-# FAKE_EGL_FAIL_MAKECURRENT_SURFACE, when set by the caller, select the stack and the expected outcome)
+# (FAKE_DIR, EXPECT_WINDOW_FAIL, EXPECT_VULKAN_WINDOW, EXPECT_MAKECURRENT_FAIL,
+# FAKE_EGL_FAIL_MAKECURRENT_SURFACE, FAKE_KMS_FLIP_MS and SDL_KMSDRM_PRESENT_TIMING,
+# when set by the caller, select the stack and the expected outcome)
 run_case() {
     local name=$1 prefix=$2 orientation=$3 atomic=$4 native=$5 fences=$6 hint=$7 rotation=$8 panel=$9
     local log="$WORK/case-$name.log" rc=0
@@ -128,6 +134,8 @@ run_case() {
         EXPECT_VULKAN_WINDOW="${EXPECT_VULKAN_WINDOW:-0}" \
         EXPECT_MAKECURRENT_FAIL="${EXPECT_MAKECURRENT_FAIL:-0}" \
         FAKE_EGL_FAIL_MAKECURRENT_SURFACE="${FAKE_EGL_FAIL_MAKECURRENT_SURFACE:-}" \
+        FAKE_KMS_FLIP_MS="${FAKE_KMS_FLIP_MS:-}" \
+        SDL_KMSDRM_PRESENT_TIMING="${SDL_KMSDRM_PRESENT_TIMING:-}" \
         FAKE_KMS_PANEL_ORIENTATION="$orientation" FAKE_KMS_ATOMIC="$atomic" \
         FAKE_EGL_NATIVE_FENCE="$native" FAKE_EGL_FENCE_SYNC="$fences" \
         EXPECT_ROTATION="$rotation" EXPECT_PANEL_PROP="$panel" \
@@ -191,6 +199,82 @@ if ! FAKE_DIR="$WORK/fake-nolink" EXPECT_WINDOW_FAIL=1 \
     sed 's/^/    /' "$WORK/case-lsu-gl-load-fails.log"
 fi
 
+# tsp-mc9m.41.924.16.13: flips that complete 4 ms after their commit, as a real
+# panel's do. SDL must wait for the previous flip before the next nonblocking
+# commit, although a CPU wait on the imported EGL fence returns at once (Zink);
+# the fake fails a commit that gets ahead with -EBUSY. SDL_KMSDRM_PRESENT_TIMING
+# logs one summary line per present stage when the window is destroyed.
+timing_lines() {
+    grep -cE 'KMSDRM present timing: ' "$WORK/case-$1.log" || true
+}
+# commit_fail: the unrotated atomic path's frame-1 commit is the upstream empty
+# request after the fullscreen switch (see test-kmsdrm-rotation.c), so it counts
+# one failed commit; the rotated path rebuilds its surfaces without committing.
+check_timing() {  # case level rotation commit_fail stage...
+    local name=$1 level=$2 rotation=$3 fails=$4 log="$WORK/case-$1.log" stage
+    shift 4
+    if ! grep -qE "KMSDRM present timing: level=$level rotation=$rotation frames=[1-9][0-9]* commit_busy=0 commit_fail=$fails\$" "$log"; then
+        echo "FAIL: $name: no timing summary with level=$level rotation=$rotation commit_busy=0 commit_fail=$fails"
+        return 1
+    fi
+    for stage in "$@"; do
+        if ! grep -qE "KMSDRM present timing: stage=$stage n=[1-9][0-9]* mean_ms=[0-9.]+ p50_ms=[0-9.]+ p90_ms=[0-9.]+ max_ms=[0-9.]+\$" "$log"; then
+            echo "FAIL: $name: no timing line for stage $stage"
+            return 1
+        fi
+    done
+    echo "ok: $name: timing summary level=$level rotation=$rotation, stages $*"
+}
+no_stage() {  # case stage...
+    local name=$1 stage
+    shift
+    for stage in "$@"; do
+        if grep -qE "KMSDRM present timing: stage=$stage " "$WORK/case-$name.log"; then
+            echo "FAIL: $name: stage $stage timed, but it does not apply here"
+            return 1
+        fi
+    done
+}
+flip_case() {  # name orientation native timing rotation panel
+    local name=$1 orientation=$2 native=$3 timing=$4 rotation=$5 panel=$6
+    FAKE_KMS_FLIP_MS=4 SDL_KMSDRM_PRESENT_TIMING="$timing" \
+        run_case "$name" head "$orientation" 1 "$native" 1 "" "$rotation" "$panel"
+}
+if ! { flip_case flip-lsu-fenced-t1 "Left Side Up" 1 1 90 90 &&
+       check_timing flip-lsu-fenced-t1 1 90 0 frame app app_swap rotate present flip_wait end &&
+       no_stage flip-lsu-fenced-t1 app_gpu rotate_gpu; }; then
+    failed+=(flip-lsu-fenced-t1)
+    sed 's/^/    /' "$WORK/case-flip-lsu-fenced-t1.log"
+fi
+if ! { flip_case flip-normal-fenced-t1 Normal 1 1 0 0 &&
+       check_timing flip-normal-fenced-t1 1 0 1 frame app present flip_wait &&
+       no_stage flip-normal-fenced-t1 app_swap app_gpu rotate rotate_gpu end; }; then
+    failed+=(flip-normal-fenced-t1)
+    sed 's/^/    /' "$WORK/case-flip-normal-fenced-t1.log"
+fi
+if ! { flip_case flip-rsu-fenced-t2 "Right Side Up" 1 2 270 270 &&
+       check_timing flip-rsu-fenced-t2 2 270 0 frame app app_swap app_gpu rotate rotate_gpu present flip_wait end; }; then
+    failed+=(flip-rsu-fenced-t2)
+    sed 's/^/    /' "$WORK/case-flip-rsu-fenced-t2.log"
+fi
+if ! { flip_case flip-normal-fenced-t2 Normal 1 2 0 0 &&
+       check_timing flip-normal-fenced-t2 2 0 1 frame app app_gpu present flip_wait; }; then
+    failed+=(flip-normal-fenced-t2)
+    sed 's/^/    /' "$WORK/case-flip-normal-fenced-t2.log"
+fi
+# The double-buffered path commits blocking; the kernel (and the fake) wait.
+if ! flip_case flip-lsu-double "Left Side Up" 0 "" 90 90; then
+    failed+=(flip-lsu-double)
+    sed 's/^/    /' "$WORK/case-flip-lsu-double.log"
+fi
+# Timing off (unset) is the default: nothing is logged.
+for name in lsu-fenced normal-fenced flip-lsu-double; do
+    if [ "$(timing_lines "$name")" != 0 ]; then
+        echo "FAIL: $name: timing lines without SDL_KMSDRM_PRESENT_TIMING"
+        failed+=("$name-timing-off")
+    fi
+done
+
 if [ "${#failed[@]}" -ne 0 ]; then
     echo "FAIL: backend scenarios: ${failed[*]}" >&2
     exit 1
@@ -246,6 +330,32 @@ else
     fi
     grep -E 'injected failures|FAIL: after the failed surface rebuild' "$WORK/case-leak-lsu-makecurrent-fails.log"
     echo "ok: $LEAK_SHA leaks the rebuild's surfaces and context when the final eglMakeCurrent fails (the defect fixed here)"
+fi
+
+step "6. red: the base commit's wait for the previous flip"
+if [ -z "$BASE_SHA" ] || ! git -C "$SRC" cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+    echo "SKIP: no base commit given (BASE_SHA)"
+elif git -C "$SRC" show "$BASE_SHA:sdl3/src/video/kmsdrm/SDL_kmsdrmvideo.h" 2>/dev/null | grep -q kms_out_fence_wait_fd; then
+    echo "SKIP: base $BASE_SHA already waits on the OUT_FENCE itself"
+else
+    if [ ! -d "$WORK/prefix-base" ]; then
+        mkdir -p "$WORK/base-src"
+        git -C "$SRC" archive "$BASE_SHA" sdl3 | tar -x -C "$WORK/base-src"
+        build_sdl "$WORK/base-src" base
+    fi
+    for spec in "base-flip-lsu-fenced|Left Side Up|90" "base-flip-normal-fenced|Normal|0"; do
+        IFS='|' read -r name orientation rotation <<<"$spec"
+        if FAKE_KMS_FLIP_MS=4 run_case "$name" base "$orientation" 1 1 1 "" "$rotation" "$rotation"; then
+            echo "FAIL: the base SDL passed $name; the test does not detect the defect" >&2
+            exit 1
+        fi
+        if ! grep -q 'nonblocking atomic commit while the previous flip is still pending (-EBUSY)' "$WORK/case-$name.log"; then
+            echo "FAIL: the base SDL failed $name, but not with -EBUSY:" >&2
+            sed 's/^/    /' "$WORK/case-$name.log" >&2
+            exit 1
+        fi
+        echo "ok: $name: the base SDL's next nonblocking commit reaches a pending flip (-EBUSY), the defect fixed here"
+    done
 fi
 
 step "RESULT: PASS"

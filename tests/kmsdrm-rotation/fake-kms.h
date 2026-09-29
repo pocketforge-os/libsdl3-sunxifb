@@ -77,6 +77,12 @@ typedef struct FakeKmsReport
     int plane_src_w, plane_src_h;   // atomic SRC_W/SRC_H >> 16 of the last commit
     int plane_crtc_w, plane_crtc_h;
     int atomic_commits;
+    // FAKE_KMS_FLIP_MS > 0 (tsp-mc9m.41.924.16.13): each flip completes that
+    // long after its commit, and its OUT_FENCE is a timerfd that polls
+    // readable at that moment, as a sync_file does.
+    int flip_fences;           // OUT_FENCE fds handed out for a pending flip
+    int busy_commits;          // nonblocking commits made while a flip was pending (-EBUSY)
+    int blocking_stalls;       // blocking commits that had to wait for a pending flip
 
     // EGL state after the last call.
     void *current_ctx;

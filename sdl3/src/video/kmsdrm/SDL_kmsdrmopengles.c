@@ -27,7 +27,10 @@
 #include "SDL_kmsdrmopengles.h"
 #include "SDL_kmsdrmdyn.h"
 #include "SDL_kmsdrmrotate.h"
+#include "SDL_kmsdrmtiming.h"
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #define VOID2U64(x) ((uint64_t)(size_t)(x))
 
@@ -149,6 +152,14 @@ static bool KMSDRM_GLES_SwapWindowFenced(SDL_VideoDevice *_this, SDL_Window * wi
         return SDL_EGL_SetError("Failed to swap EGL buffers", "eglSwapBuffers");
     }
 
+    /* PocketForge SDL_KMSDRM_PRESENT_TIMING=2: how long the frame takes to
+       finish on the GPU. Rotated, the rotate pass times its own GPU stages. */
+    if (KMSDRM_Timing_Level(dispdata->timing) >= 2 && windata->rotation == 0) {
+        const Uint64 gpu_start = KMSDRM_Timing_Now(dispdata->timing);
+        _this->egl_data->eglClientWaitSyncKHR(_this->egl_data->egl_display, dispdata->gpu_fence, 0, EGL_FOREVER_KHR);
+        KMSDRM_Timing_Add(dispdata->timing, KMSDRM_TIMING_APP_GPU, gpu_start);
+    }
+
     /******************************************************************/
     /* EXPORT the GPU-side FENCE OBJECT to the fence INPUT FD, so we  */
     /* can pass it into the kernel. Atomic ioctl will pass the        */
@@ -265,6 +276,18 @@ static bool KMSDRM_GLES_SwapWindowFenced(SDL_VideoDevice *_this, SDL_Window * wi
        time we come here we can free it like we just did with the previous
        front buffer. */
     windata->bo = windata->next_bo;
+
+    /* PocketForge: keep our own reference to this flip's OUT_FENCE, which
+       drm_atomic_waitpending() polls before the next commit. The EGL fence
+       below consumes kms_out_fence_fd, and a CPU wait on it does not wait on
+       every driver (Zink returns at once). */
+    if (dispdata->kms_out_fence_wait_fd != -1) {
+        close(dispdata->kms_out_fence_wait_fd);
+    }
+    dispdata->kms_out_fence_wait_fd = -1;
+    if (dispdata->kms_out_fence_fd != -1) {
+        dispdata->kms_out_fence_wait_fd = fcntl(dispdata->kms_out_fence_fd, F_DUPFD_CLOEXEC, 0);
+    }
 
     /****************************************************************/
     /* Import the KMS-side FENCE OUTPUT FD from the kernel to the   */
@@ -508,7 +531,9 @@ static bool KMSDRM_GLES_SwapWindowLegacy(SDL_VideoDevice *_this, SDL_Window *win
 static bool KMSDRM_GLES_SwapWindowRotated(SDL_VideoDevice *_this, SDL_Window *window)
 {
     SDL_WindowData *windata = (SDL_WindowData *) window->internal;
+    KMSDRM_Timing *timing = SDL_GetDisplayDriverDataForWindow(window)->timing;
     SDL_GLContext app_context = SDL_GL_GetCurrentContext();
+    Uint64 stage_start;
     bool result;
 
     // Skip the swap if we've switched away to another VT
@@ -526,20 +551,33 @@ static bool KMSDRM_GLES_SwapWindowRotated(SDL_VideoDevice *_this, SDL_Window *wi
         return KMSDRM_CreateSurfaces(_this, window);
     }
 
+    KMSDRM_Timing_SwapStart(timing);
     result = KMSDRM_Rotate_BeginPresent(_this, window);
     if (result) {
+        stage_start = KMSDRM_Timing_Now(timing);
         result = windata->swap_window(_this, window);
+        KMSDRM_Timing_Add(timing, KMSDRM_TIMING_PRESENT, stage_start);
     }
+    stage_start = KMSDRM_Timing_Now(timing);
     KMSDRM_Rotate_EndPresent(_this, window, app_context);
+    KMSDRM_Timing_Add(timing, KMSDRM_TIMING_END, stage_start);
+    KMSDRM_Timing_FrameDone(timing);
     return result;
 }
 
 bool KMSDRM_GLES_SwapWindow(SDL_VideoDevice *_this, SDL_Window * window)
 {
     SDL_WindowData *windata = (SDL_WindowData *) window->internal;
+    SDL_DisplayData *dispdata = SDL_GetDisplayDriverDataForWindow(window);
+    Uint64 stage_start;
+    bool result;
 
     if (windata->swap_window == NULL) {
         SDL_VideoData *viddata = _this->internal;
+        // PocketForge: SDL_KMSDRM_PRESENT_TIMING, read once per window.
+        if (!dispdata->timing) {
+            dispdata->timing = KMSDRM_Timing_Create();
+        }
         if (viddata->is_atomic) {
             // We want the fenced version by default, but it needs extensions.
             if ( (SDL_GetHintBoolean(SDL_HINT_VIDEO_DOUBLE_BUFFER, false)) || (!SDL_EGL_HasExtension(_this, SDL_EGL_DISPLAY_EXTENSION, "EGL_ANDROID_native_fence_sync")) ) {
@@ -554,7 +592,11 @@ bool KMSDRM_GLES_SwapWindow(SDL_VideoDevice *_this, SDL_Window * window)
     if (windata->rotation != 0) {
         return KMSDRM_GLES_SwapWindowRotated(_this, window);
     }
-    return windata->swap_window(_this, window);
+    stage_start = KMSDRM_Timing_SwapStart(dispdata->timing);
+    result = windata->swap_window(_this, window);
+    KMSDRM_Timing_Add(dispdata->timing, KMSDRM_TIMING_PRESENT, stage_start);
+    KMSDRM_Timing_FrameDone(dispdata->timing);
+    return result;
 }
 
 SDL_EGL_MakeCurrent_impl(KMSDRM)

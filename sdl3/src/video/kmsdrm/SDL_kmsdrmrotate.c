@@ -34,6 +34,7 @@
 #include "SDL_kmsdrmvideo.h"
 #include "SDL_kmsdrmrotate.h"
 #include "SDL_kmsdrmrotategl.h"
+#include "SDL_kmsdrmtiming.h"
 
 #include <errno.h>
 #include <string.h>
@@ -332,6 +333,8 @@ bool KMSDRM_Rotate_BeginPresent(SDL_VideoDevice *_this, SDL_Window *window)
     SDL_WindowData *windata = window->internal;
     struct KMSDRM_Rotate *rot = windata->rotate;
     SDL_EGL_VideoData *egl = _this->egl_data;
+    KMSDRM_Timing *timing = SDL_GetDisplayDriverDataForWindow(window)->timing;
+    Uint64 stage_start = KMSDRM_Timing_Now(timing);
     EGLSyncKHR app_fence = EGL_NO_SYNC_KHR;
     struct gbm_bo *bo;
     GLuint texture;
@@ -356,6 +359,15 @@ bool KMSDRM_Rotate_BeginPresent(SDL_VideoDevice *_this, SDL_Window *window)
     } else {
         rot->gl.Finish();
     }
+    KMSDRM_Timing_Add(timing, KMSDRM_TIMING_APP_SWAP, stage_start);
+
+    // SDL_KMSDRM_PRESENT_TIMING=2: how long the application's frame takes to finish on the GPU.
+    if (KMSDRM_Timing_Level(timing) >= 2 && app_fence != EGL_NO_SYNC_KHR) {
+        stage_start = KMSDRM_Timing_Now(timing);
+        egl->eglClientWaitSyncKHR(egl->egl_display, app_fence, 0, EGL_FOREVER_KHR);
+        KMSDRM_Timing_Add(timing, KMSDRM_TIMING_APP_GPU, stage_start);
+    }
+    stage_start = KMSDRM_Timing_Now(timing);
 
     bo = KMSDRM_gbm_surface_lock_front_buffer(windata->gs);
     if (!bo) {
@@ -400,6 +412,14 @@ bool KMSDRM_Rotate_BeginPresent(SDL_VideoDevice *_this, SDL_Window *window)
         rot->gl.Flush();
     } else {
         rot->gl.Finish();
+    }
+    KMSDRM_Timing_Add(timing, KMSDRM_TIMING_ROTATE, stage_start);
+
+    // SDL_KMSDRM_PRESENT_TIMING=2: how long the rotate pass takes to finish on the GPU.
+    if (KMSDRM_Timing_Level(timing) >= 2 && rot->frame_fence != EGL_NO_SYNC_KHR) {
+        stage_start = KMSDRM_Timing_Now(timing);
+        egl->eglClientWaitSyncKHR(egl->egl_display, rot->frame_fence, 0, EGL_FOREVER_KHR);
+        KMSDRM_Timing_Add(timing, KMSDRM_TIMING_ROTATE_GPU, stage_start);
     }
     return true;
 }

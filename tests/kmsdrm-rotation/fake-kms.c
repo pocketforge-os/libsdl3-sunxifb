@@ -21,6 +21,15 @@
  *   FAKE_EGL_FAIL_MAKECURRENT_SURFACE  N: the first eglMakeCurrent that binds
  *                               a context to an EGL surface made from gbm
  *                               surface N (in creation order) fails
+ *   FAKE_KMS_FLIP_MS            N > 0: an atomic flip completes N ms after its
+ *                               commit (default 0: at once). Its OUT_FENCE is a
+ *                               timerfd that polls readable then, as the
+ *                               kernel's sync_file does, and a NONBLOCK commit
+ *                               while a flip is pending fails with -EBUSY, as
+ *                               the atomic helpers' stall check does (counted
+ *                               as a contract violation). eglClientWaitSyncKHR
+ *                               on a fence imported from that fd still returns
+ *                               at once: that is what Mesa's Zink does.
  *
  * It is also installed as libvulkan.so.1: vkGetInstanceProcAddr and
  * vkEnumerateInstanceExtensionProperties (VK_KHR_surface, VK_KHR_display) are
@@ -42,6 +51,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/timerfd.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <xf86drm.h>
@@ -126,6 +137,8 @@ static int g_atomic = 1;
 static int g_native_fence = 1;
 static int g_fence_sync = 1;
 static int g_fail_makecurrent_surface = -1;
+static int g_flip_ms = 0;
+static uint64_t g_flip_done_ns;  // CLOCK_MONOTONIC time the last flip completes
 static char g_display_extensions[512];
 static drmModeModeInfo g_mode;
 
@@ -184,6 +197,9 @@ static void fake_init(void)
     g_fence_sync = env_flag("FAKE_EGL_FENCE_SYNC", 1);
     if (getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE") && *getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE")) {
         g_fail_makecurrent_surface = atoi(getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE"));
+    }
+    if (getenv("FAKE_KMS_FLIP_MS") && *getenv("FAKE_KMS_FLIP_MS")) {
+        g_flip_ms = atoi(getenv("FAKE_KMS_FLIP_MS"));
     }
 
     snprintf(g_display_extensions, sizeof(g_display_extensions),
@@ -1010,13 +1026,49 @@ FAKE_EXPORT int drmModeAtomicAddProperty(drmModeAtomicReqPtr req, uint32_t objec
     return ++req->count;
 }
 
+static uint64_t monotonic_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void sleep_until_ns(uint64_t when)
+{
+    struct timespec ts;
+    ts.tv_sec = (time_t)(when / 1000000000ull);
+    ts.tv_nsec = (long)(when % 1000000000ull);
+    while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {
+    }
+}
+
+// FAKE_KMS_FLIP_MS: an OUT_FENCE that polls readable when the pending flip completes.
+static int flip_fence_fd(void)
+{
+    struct itimerspec its;
+    int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+
+    if (tfd < 0) {
+        fake_error("timerfd_create: %s", strerror(errno));
+        return open("/dev/null", O_RDONLY | O_CLOEXEC);
+    }
+    memset(&its, 0, sizeof(its));
+    its.it_value.tv_sec = (time_t)(g_flip_done_ns / 1000000000ull);
+    its.it_value.tv_nsec = (long)(g_flip_done_ns % 1000000000ull);
+    if (timerfd_settime(tfd, TFD_TIMER_ABSTIME, &its, NULL) != 0) {
+        fake_error("timerfd_settime: %s", strerror(errno));
+    }
+    g_report.flip_fences++;
+    return tfd;
+}
+
 FAKE_EXPORT int drmModeAtomicCommit(int fd, const drmModeAtomicReqPtr req, uint32_t flags, void *user_data)
 {
     // Later values for the same object/property win, as in libdrm.
     uint64_t fb_id = 0, src_w = 0, src_h = 0, crtc_w = 0, crtc_h = 0;
     int have_fb = 0, i;
+    int *out_fence = NULL;
     (void)fd;
-    (void)flags;
     (void)user_data;
 
     if (!req) {
@@ -1025,6 +1077,17 @@ FAKE_EXPORT int drmModeAtomicCommit(int fd, const drmModeAtomicReqPtr req, uint3
     if (!g_atomic) {
         fake_error("atomic commit without DRM_CLIENT_CAP_ATOMIC");
         return -EINVAL;
+    }
+    if (g_flip_ms > 0 && monotonic_ns() < g_flip_done_ns) {
+        if (flags & DRM_MODE_ATOMIC_NONBLOCK) {
+            // drm_atomic_helper_setup_commit(): "Userspace is not allowed to
+            // get ahead of the previous commit with nonblocking ones."
+            g_report.busy_commits++;
+            fake_error("nonblocking atomic commit while the previous flip is still pending (-EBUSY)");
+            return -EBUSY;
+        }
+        g_report.blocking_stalls++;
+        sleep_until_ns(g_flip_done_ns);
     }
     for (i = 0; i < req->count; ++i) {
         const FakeProp *prop = find_prop(req->items[i].prop);
@@ -1054,7 +1117,7 @@ FAKE_EXPORT int drmModeAtomicCommit(int fd, const drmModeAtomicReqPtr req, uint3
             break;
         case PROP_OUT_FENCE_PTR:
             if (req->items[i].value) {
-                *(int *)(uintptr_t)req->items[i].value = open("/dev/null", O_RDONLY | O_CLOEXEC);
+                out_fence = (int *)(uintptr_t)req->items[i].value;
             }
             break;
         default:
@@ -1085,6 +1148,16 @@ FAKE_EXPORT int drmModeAtomicCommit(int fd, const drmModeAtomicReqPtr req, uint3
         g_report.plane_src_h = (int)(src_h >> 16);
         g_report.plane_crtc_w = (int)crtc_w;
         g_report.plane_crtc_h = (int)crtc_h;
+    }
+    if (g_flip_ms > 0) {
+        g_flip_done_ns = monotonic_ns() + (uint64_t)g_flip_ms * 1000000ull;
+        if (!(flags & DRM_MODE_ATOMIC_NONBLOCK)) {
+            // A blocking commit returns once its flip is done.
+            sleep_until_ns(g_flip_done_ns);
+        }
+    }
+    if (out_fence) {
+        *out_fence = g_flip_ms > 0 ? flip_fence_fd() : open("/dev/null", O_RDONLY | O_CLOEXEC);
     }
     g_report.atomic_commits++;
     return 0;

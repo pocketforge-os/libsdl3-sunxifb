@@ -20,7 +20,12 @@
  *                      -DFAKE_KMS_OMIT_GL_LINK_PROGRAM), so creating the GL
  *                      window must fail cleanly: no call through a missing
  *                      entry point, and nothing left alive or locked
- *   FAKE_KMS_ATOMIC, FAKE_EGL_FENCE_SYNC   (read by the fake too)
+ *   FAKE_KMS_ATOMIC, FAKE_EGL_FENCE_SYNC, FAKE_EGL_NATIVE_FENCE,
+ *   FAKE_KMS_FLIP_MS   (read by the fake too). With FAKE_KMS_FLIP_MS > 0 every
+ *                      flip completes that long after its commit, and SDL must
+ *                      wait for it before the next nonblocking commit even
+ *                      though a CPU wait on the imported EGL fence returns at
+ *                      once (Zink): no commit may fail with -EBUSY
  *
  * Checks what an application sees (display mode and window size: 1280x720 for
  * a panel reporting Left/Right Side Up), what reaches the panel (a 720x1280
@@ -95,6 +100,8 @@ int main(void)
     const int expect_panel_prop = env_int("EXPECT_PANEL_PROP", 0);
     const int atomic = env_int("FAKE_KMS_ATOMIC", 1);
     const int fence_sync = env_int("FAKE_EGL_FENCE_SYNC", 1);
+    const int native_fence = env_int("FAKE_EGL_NATIVE_FENCE", 1);
+    const int flip_ms = env_int("FAKE_KMS_FLIP_MS", 0);
     const int expect_window_fail = env_int("EXPECT_WINDOW_FAIL", 0);
     const int expect_vulkan_window = env_int("EXPECT_VULKAN_WINDOW", 0);
     const int expect_makecurrent_fail = env_int("EXPECT_MAKECURRENT_FAIL", 0);
@@ -294,6 +301,15 @@ int main(void)
           app_surface >= 0 ? report->surfaces[app_surface].h : -1, lw, lh);
     CHECK(report->scanouts > 0 && report->scanout_w == FAKE_KMS_PANEL_W && report->scanout_h == FAKE_KMS_PANEL_H,
           "the panel scans out a %dx%d buffer (%d scanouts)", report->scanout_w, report->scanout_h, report->scanouts);
+    if (atomic && flip_ms > 0) {
+        CHECK(report->busy_commits == 0,
+              "flips take %d ms: no nonblocking commit reached a pending flip (%d -EBUSY)", flip_ms,
+              report->busy_commits);
+        if (native_fence) {
+            CHECK(report->flip_fences >= frames - 2, "the fenced path asked for an OUT_FENCE per flip (%d)",
+                  report->flip_fences);
+        }
+    }
     if (atomic) {
         CHECK(report->plane_src_w == FAKE_KMS_PANEL_W && report->plane_src_h == FAKE_KMS_PANEL_H &&
                   report->plane_crtc_w == FAKE_KMS_PANEL_W && report->plane_crtc_h == FAKE_KMS_PANEL_H,
