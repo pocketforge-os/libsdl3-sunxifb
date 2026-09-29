@@ -49,6 +49,7 @@
 #include "SDL_kmsdrmvulkan.h"
 #include "SDL_kmsdrmorientation.h"
 #include "SDL_kmsdrmrotate.h"
+#include "SDL_kmsdrmtiming.h"
 #include <dirent.h>
 #include <errno.h>
 #include <poll.h>
@@ -526,7 +527,7 @@ int drm_atomic_commit(SDL_VideoDevice *_this, SDL_DisplayData *dispdata, bool bl
 {
     SDL_VideoData *viddata = ((SDL_VideoData *)_this->internal);
     uint32_t atomic_flags = 0;
-    int ret;
+    int ret, commit_errno;
 
     if (!blocking) {
         atomic_flags |= DRM_MODE_ATOMIC_NONBLOCK;
@@ -540,8 +541,11 @@ int drm_atomic_commit(SDL_VideoDevice *_this, SDL_DisplayData *dispdata, bool bl
        or it will error. */
     drm_atomic_waitpending(_this, dispdata);
 
+    errno = 0; // PocketForge: no stale errno may reach the classification below.
     ret = KMSDRM_drmModeAtomicCommit(viddata->drm_fd, dispdata->atomic_req,
               atomic_flags, NULL);
+    commit_errno = errno; // Saved before any other call can overwrite it (SDL_kmsdrmcommit.h).
+    KMSDRM_Timing_CountCommit(dispdata->timing, ret, commit_errno);
 
     if (ret) {
         SDL_SetError("Atomic commit failed, returned %d.", ret);
@@ -564,9 +568,45 @@ out:
     return ret;
 }
 
+/* PocketForge: a page flip's OUT_FENCE is a sync_file, which polls readable
+   once the flip has completed. Bounded, so a display that never completes a
+   flip costs a logged second instead of a hung application. */
+#define KMSDRM_FLIP_WAIT_TIMEOUT_MS 1000
+
+static void KMSDRM_WaitSyncFile(int fd)
+{
+    const Uint64 deadline = SDL_GetTicksNS() + SDL_MS_TO_NS(KMSDRM_FLIP_WAIT_TIMEOUT_MS);
+
+    for (;;) {
+        struct pollfd pfd;
+        const Uint64 now = SDL_GetTicksNS();
+        const int left_ms = now >= deadline ? 0 : (int)SDL_NS_TO_MS(deadline - now) + 1;
+        int ret;
+
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        ret = poll(&pfd, 1, left_ms);
+        if (ret > 0) {
+            return; // Signalled (or an error state: nothing left to wait for).
+        }
+        if (ret == 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, "KMSDRM: the previous page flip did not complete within %d ms",
+                        KMSDRM_FLIP_WAIT_TIMEOUT_MS);
+            return;
+        }
+        if (errno != EINTR && errno != EAGAIN) {
+            return;
+        }
+    }
+}
+
 void
 drm_atomic_waitpending(SDL_VideoDevice *_this, SDL_DisplayData *dispdata)
 {
+    const Uint64 start = KMSDRM_Timing_Now(dispdata->timing);
+    bool waited = false;
+
     /* Will return immediately if we have already destroyed the fence, because we NULL-ify it just after.
        Also, will return immediately in double-buffer mode, because kms_fence will alsawys be NULL. */
     if (dispdata->kms_fence) {
@@ -579,6 +619,22 @@ drm_atomic_waitpending(SDL_VideoDevice *_this, SDL_DisplayData *dispdata)
 
         _this->egl_data->eglDestroySyncKHR(_this->egl_data->egl_display, dispdata->kms_fence);
             dispdata->kms_fence = NULL;
+        waited = true;
+    }
+
+    /* PocketForge: the wait above is a no-op on Mesa's Zink (its fence_finish
+       returns at once for a fence imported from a sync_file), so also wait on
+       the flip's sync_file itself. On drivers whose EGL wait is real, the flip
+       has already completed and this poll returns at once. */
+    if (dispdata->kms_out_fence_wait_fd != -1) {
+        KMSDRM_WaitSyncFile(dispdata->kms_out_fence_wait_fd);
+        close(dispdata->kms_out_fence_wait_fd);
+        dispdata->kms_out_fence_wait_fd = -1;
+        waited = true;
+    }
+
+    if (waited) {
+        KMSDRM_Timing_Add(dispdata->timing, KMSDRM_TIMING_FLIP_WAIT, start);
     }
 }
 
@@ -1130,6 +1186,7 @@ static void KMSDRM_AddDisplay(SDL_VideoDevice *_this, drmModeConnector *conn, dr
     dispdata->cursor_bo_drm_fd = -1;
     dispdata->kms_in_fence_fd = -1;
     dispdata->kms_out_fence_fd = -1;
+    dispdata->kms_out_fence_wait_fd = -1;
 
     /* Since we create and show the default cursor on KMSDRM_InitMouse(),
        and we call KMSDRM_InitMouse() when we create a window, we have to know
@@ -2062,6 +2119,11 @@ void KMSDRM_DestroyWindow(SDL_VideoDevice *_this, SDL_Window *window)
         return;
     }
 
+    // PocketForge: the SDL_KMSDRM_PRESENT_TIMING summary of this window's presents.
+    if (dispdata && dispdata->timing) {
+        KMSDRM_Timing_Report(dispdata->timing, windata->rotation);
+    }
+
     // restore vrr state
     KMSDRM_CrtcSetVrr(windata->viddata->drm_fd, dispdata->crtc.crtc->crtc_id, dispdata->saved_vrr);
 
@@ -2074,6 +2136,10 @@ void KMSDRM_DestroyWindow(SDL_VideoDevice *_this, SDL_Window *window)
 
         // Destroy GBM surface and buffers.
         KMSDRM_DestroySurfaces(_this, window);
+
+        // PocketForge: the teardown commit above was the last one timed.
+        KMSDRM_Timing_Destroy(dispdata->timing);
+        dispdata->timing = NULL;
 
         /* Unload library and deinit GBM, but only if this is the last window.
            Note that this is the right comparison because num_windows could be 1

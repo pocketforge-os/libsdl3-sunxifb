@@ -155,6 +155,18 @@ struct SDL_DisplayData
     EGLSyncKHR kms_fence;
     EGLSyncKHR gpu_fence;
 
+    /* PocketForge (tsp-mc9m.41.924.16.13): our own reference to the last
+       nonblocking commit's OUT_FENCE sync_file, polled by
+       drm_atomic_waitpending() before the next commit. The EGL fence imported
+       from the same fd (kms_fence) is not enough: Mesa's Zink returns from
+       eglClientWaitSyncKHR on an imported native fence at once, so the next
+       nonblocking commit could reach the kernel while the previous flip is
+       still pending (-EBUSY). -1 when there is no pending flip. */
+    int kms_out_fence_wait_fd;
+
+    // PocketForge: SDL_KMSDRM_PRESENT_TIMING per-stage timing (NULL when off).
+    struct KMSDRM_Timing *timing;
+
     bool default_cursor_init;
 
     /* PocketForge: the connector's "panel orientation" in degrees (see
