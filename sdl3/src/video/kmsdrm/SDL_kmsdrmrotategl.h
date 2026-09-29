@@ -246,4 +246,217 @@ static inline void KMSDRM_RotateGL_Fini(KMSDRM_RotateGL *gl)
     gl->program = 0;
 }
 
+/* tsp-mc9m.41.924.16.13.3: device experiments on the rotate pass, selected by
+   SDL_KMSDRM_ROTATE_EXPERIMENT. They exist to attribute the rotate pass's GPU
+   time on the device (one boot, no rebuild per arm), and are off by default:
+   unset (or empty), the pass makes exactly the calls it always made and never
+   resolves the entry points below.
+
+     sample0    the same draw with the 0-degree quad: the landscape image
+                squeezed onto the panel, unrotated. It reads every source cache
+                line, row by row, over the same target and fragment count;
+                only the sampling direction differs from the rotated draw.
+                Diagnostic image.
+     clear      a glClear of the present surface instead of the textured draw.
+                Diagnostic image (solid dark grey).
+     loadclear  a glClear, then the normal rotated draw: the same image, but the
+                target is cleared instead of loaded.
+     twiddle    the application's frame is first copied (glCopyTexSubImage2D,
+                row-wise) into a texture the rotate context owns, which the
+                driver may lay out optimally, and the normal rotated draw
+                samples that copy. The same image. */
+typedef enum KMSDRM_RotateExperiment
+{
+    KMSDRM_ROTATE_EXPERIMENT_NONE = 0,
+    KMSDRM_ROTATE_EXPERIMENT_SAMPLE0,
+    KMSDRM_ROTATE_EXPERIMENT_CLEAR,
+    KMSDRM_ROTATE_EXPERIMENT_LOADCLEAR,
+    KMSDRM_ROTATE_EXPERIMENT_TWIDDLE
+} KMSDRM_RotateExperiment;
+
+#define SDL_HINT_KMSDRM_ROTATE_EXPERIMENT "SDL_KMSDRM_ROTATE_EXPERIMENT"
+
+// The clear colour of the clear and loadclear experiments: 0x20 grey, exact in 8-bit UNORM.
+#define KMSDRM_ROTATEGL_CLEAR_LEVEL (32.0f / 255.0f)
+
+#ifndef GL_BGRA_EXT
+#define GL_BGRA_EXT 0x80E1
+#endif
+
+static inline const char *KMSDRM_RotateGL_ExperimentName(KMSDRM_RotateExperiment experiment)
+{
+    switch (experiment) {
+    case KMSDRM_ROTATE_EXPERIMENT_SAMPLE0:
+        return "sample0";
+    case KMSDRM_ROTATE_EXPERIMENT_CLEAR:
+        return "clear";
+    case KMSDRM_ROTATE_EXPERIMENT_LOADCLEAR:
+        return "loadclear";
+    case KMSDRM_ROTATE_EXPERIMENT_TWIDDLE:
+        return "twiddle";
+    default:
+        return "none";
+    }
+}
+
+/* SDL_KMSDRM_ROTATE_EXPERIMENT -> experiment. NULL and "" are no experiment
+   (*recognised = 1); an unknown value is also no experiment, but with
+   *recognised = 0 so the caller can say it ignored it. */
+static inline KMSDRM_RotateExperiment KMSDRM_RotateGL_ParseExperiment(const char *value, int *recognised)
+{
+    static const KMSDRM_RotateExperiment all[] = {
+        KMSDRM_ROTATE_EXPERIMENT_SAMPLE0, KMSDRM_ROTATE_EXPERIMENT_CLEAR,
+        KMSDRM_ROTATE_EXPERIMENT_LOADCLEAR, KMSDRM_ROTATE_EXPERIMENT_TWIDDLE
+    };
+    unsigned i;
+
+    *recognised = 1;
+    if (!value || !*value) {
+        return KMSDRM_ROTATE_EXPERIMENT_NONE;
+    }
+    for (i = 0; i < sizeof(all) / sizeof(all[0]); ++i) {
+        if (KMSDRM_OrientationNameIs(value, KMSDRM_RotateGL_ExperimentName(all[i]))) {
+            return all[i];
+        }
+    }
+    *recognised = 0;
+    return KMSDRM_ROTATE_EXPERIMENT_NONE;
+}
+
+// The extra GLES2 entry points the experiments use; resolved only for an experiment.
+typedef struct KMSDRM_RotateGLExp
+{
+    PFNGLBINDFRAMEBUFFERPROC BindFramebuffer;
+    PFNGLCHECKFRAMEBUFFERSTATUSPROC CheckFramebufferStatus;
+    PFNGLCLEARPROC Clear;
+    PFNGLCLEARCOLORPROC ClearColor;
+    PFNGLCOPYTEXSUBIMAGE2DPROC CopyTexSubImage2D;
+    PFNGLFRAMEBUFFERTEXTURE2DPROC FramebufferTexture2D;
+    PFNGLGENFRAMEBUFFERSPROC GenFramebuffers;
+    PFNGLTEXIMAGE2DPROC TexImage2D;
+} KMSDRM_RotateGLExp;
+
+// All-or-nothing, like KMSDRM_RotateGL_Load. Returns 1 when every entry point resolved.
+static inline int KMSDRM_RotateGL_LoadExp(KMSDRM_RotateGLExp *exp, KMSDRM_RotateGLLoader load, void *userdata)
+{
+    const KMSDRM_RotateGLExp empty = { 0 };
+    KMSDRM_RotateGLExp loaded = { 0 };
+
+    *exp = empty;
+#define KMSDRM_ROTATEGL_LOAD_EXP(TYPE, NAME)                    \
+    loaded.NAME = (TYPE)load(userdata, "gl" #NAME);             \
+    if (!loaded.NAME) {                                         \
+        return 0;                                               \
+    }
+    KMSDRM_ROTATEGL_LOAD_EXP(PFNGLBINDFRAMEBUFFERPROC, BindFramebuffer);
+    KMSDRM_ROTATEGL_LOAD_EXP(PFNGLCHECKFRAMEBUFFERSTATUSPROC, CheckFramebufferStatus);
+    KMSDRM_ROTATEGL_LOAD_EXP(PFNGLCLEARPROC, Clear);
+    KMSDRM_ROTATEGL_LOAD_EXP(PFNGLCLEARCOLORPROC, ClearColor);
+    KMSDRM_ROTATEGL_LOAD_EXP(PFNGLCOPYTEXSUBIMAGE2DPROC, CopyTexSubImage2D);
+    KMSDRM_ROTATEGL_LOAD_EXP(PFNGLFRAMEBUFFERTEXTURE2DPROC, FramebufferTexture2D);
+    KMSDRM_ROTATEGL_LOAD_EXP(PFNGLGENFRAMEBUFFERSPROC, GenFramebuffers);
+    KMSDRM_ROTATEGL_LOAD_EXP(PFNGLTEXIMAGE2DPROC, TexImage2D);
+#undef KMSDRM_ROTATEGL_LOAD_EXP
+    *exp = loaded;
+    return 1;
+}
+
+/* A w x h texture for the twiddle experiment's copy, in the current context.
+   GL_BGRA_EXT first (the layout of an ARGB8888 GBM buffer, so the copy needs
+   no format conversion), GL_RGBA if the stack refuses it. Returns 0 on failure. */
+static inline GLuint KMSDRM_RotateGL_CreateCopyTexture(const KMSDRM_RotateGL *gl, const KMSDRM_RotateGLExp *exp,
+                                                       int w, int h)
+{
+    static const GLenum formats[2] = { GL_BGRA_EXT, GL_RGBA };
+    GLuint texture = 0;
+    int i;
+
+    gl->GetError(); // Start from a clean error state.
+    gl->GenTextures(1, &texture);
+    if (!texture) {
+        return 0;
+    }
+    gl->ActiveTexture(GL_TEXTURE0);
+    gl->BindTexture(GL_TEXTURE_2D, texture);
+    for (i = 0; i < 2; ++i) {
+        exp->TexImage2D(GL_TEXTURE_2D, 0, (GLint)formats[i], w, h, 0, formats[i], GL_UNSIGNED_BYTE, NULL);
+        if (gl->GetError() == GL_NO_ERROR) {
+            return texture;
+        }
+    }
+    gl->DeleteTextures(1, &texture);
+    return 0;
+}
+
+/* A framebuffer object whose colour attachment is `texture`, the read source
+   of the twiddle experiment's copy. Leaves framebuffer 0 bound. Returns 0 when
+   it is not complete (it is then deleted by the context, never used). */
+static inline GLuint KMSDRM_RotateGL_CreateReadFramebuffer(const KMSDRM_RotateGL *gl, const KMSDRM_RotateGLExp *exp,
+                                                           GLuint texture)
+{
+    GLuint fbo = 0;
+    GLenum status;
+
+    gl->GetError();
+    exp->GenFramebuffers(1, &fbo);
+    if (!fbo) {
+        return 0;
+    }
+    exp->BindFramebuffer(GL_FRAMEBUFFER, fbo);
+    exp->FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    status = exp->CheckFramebufferStatus(GL_FRAMEBUFFER);
+    exp->BindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE || gl->GetError() != GL_NO_ERROR) {
+        return 0;
+    }
+    return fbo;
+}
+
+/* Copies the w x h image attached to `read_fbo` into `texture`, row for row,
+   and leaves framebuffer 0 (the present surface) bound. Returns 1 on success. */
+static inline int KMSDRM_RotateGL_CopyToTexture(const KMSDRM_RotateGL *gl, const KMSDRM_RotateGLExp *exp,
+                                                GLuint read_fbo, GLuint texture, int w, int h)
+{
+    gl->GetError();
+    exp->BindFramebuffer(GL_FRAMEBUFFER, read_fbo);
+    gl->ActiveTexture(GL_TEXTURE0);
+    gl->BindTexture(GL_TEXTURE_2D, texture);
+    exp->CopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
+    exp->BindFramebuffer(GL_FRAMEBUFFER, 0);
+    return gl->GetError() == GL_NO_ERROR;
+}
+
+// Fills the pw x ph present surface with the experiments' clear colour.
+static inline void KMSDRM_RotateGL_ClearPanel(const KMSDRM_RotateGL *gl, const KMSDRM_RotateGLExp *exp, int pw, int ph)
+{
+    gl->Disable(GL_SCISSOR_TEST);
+    gl->Viewport(0, 0, pw, ph);
+    exp->ClearColor(KMSDRM_ROTATEGL_CLEAR_LEVEL, KMSDRM_ROTATEGL_CLEAR_LEVEL, KMSDRM_ROTATEGL_CLEAR_LEVEL, 1.0f);
+    exp->Clear(GL_COLOR_BUFFER_BIT);
+}
+
+/* The rotate pass under an experiment (texture is what it samples: the copy,
+   for twiddle). NONE and TWIDDLE draw exactly as KMSDRM_RotateGL_Draw; `exp`
+   may be NULL only for those two. */
+static inline void KMSDRM_RotateGL_DrawExperiment(const KMSDRM_RotateGL *gl, const KMSDRM_RotateGLExp *exp,
+                                                  KMSDRM_RotateExperiment experiment, GLuint texture,
+                                                  int rotation, int pw, int ph)
+{
+    switch (experiment) {
+    case KMSDRM_ROTATE_EXPERIMENT_SAMPLE0:
+        KMSDRM_RotateGL_Draw(gl, texture, 0, pw, ph);
+        break;
+    case KMSDRM_ROTATE_EXPERIMENT_CLEAR:
+        KMSDRM_RotateGL_ClearPanel(gl, exp, pw, ph);
+        break;
+    case KMSDRM_ROTATE_EXPERIMENT_LOADCLEAR:
+        KMSDRM_RotateGL_ClearPanel(gl, exp, pw, ph);
+        KMSDRM_RotateGL_Draw(gl, texture, rotation, pw, ph);
+        break;
+    default:
+        KMSDRM_RotateGL_Draw(gl, texture, rotation, pw, ph);
+        break;
+    }
+}
+
 #endif // SDL_kmsdrmrotategl_h_

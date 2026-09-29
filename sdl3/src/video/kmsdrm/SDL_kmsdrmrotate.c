@@ -52,6 +52,7 @@ typedef struct KMSDRM_RotateImage
     struct gbm_bo *bo;
     EGLImageKHR image;
     GLuint texture;
+    GLuint read_fbo; // twiddle experiment only: the copy's read framebuffer
 } KMSDRM_RotateImage;
 
 struct KMSDRM_Rotate
@@ -65,6 +66,12 @@ struct KMSDRM_Rotate
     PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR;
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES;
     bool have_fences;
+
+    // SDL_KMSDRM_ROTATE_EXPERIMENT (tsp-mc9m.41.924.16.13.3); NONE by default.
+    KMSDRM_RotateExperiment experiment;
+    KMSDRM_RotateGLExp exp;
+    GLuint copy_texture; // twiddle: the lw x lh copy the rotated draw samples
+    int lw, lh;
 
     KMSDRM_RotateImage images[KMSDRM_ROTATE_MAX_IMAGES];
     int num_images;
@@ -121,6 +128,42 @@ static void KMSDRM_Rotate_WaitFence(SDL_VideoDevice *_this, EGLSyncKHR fence)
         _this->egl_data->eglClientWaitSyncKHR(_this->egl_data->egl_display, fence, 0, EGL_FOREVER_KHR);
         _this->egl_data->eglDestroySyncKHR(_this->egl_data->egl_display, fence);
     }
+}
+
+/* SDL_KMSDRM_ROTATE_EXPERIMENT (tsp-mc9m.41.924.16.13.3, see
+   SDL_kmsdrmrotategl.h). Runs once, with the rotate context current. Any
+   failure leaves the ordinary rotate pass: an experiment never fails a window.
+   The witness line says which pass the run actually drew. */
+static void KMSDRM_Rotate_SetupExperiment(SDL_VideoDevice *_this, struct KMSDRM_Rotate *rot)
+{
+    const char *value = SDL_GetHint(SDL_HINT_KMSDRM_ROTATE_EXPERIMENT);
+    int recognised = 1;
+    KMSDRM_RotateExperiment experiment = KMSDRM_RotateGL_ParseExperiment(value, &recognised);
+
+    rot->experiment = KMSDRM_ROTATE_EXPERIMENT_NONE;
+    if (!recognised) {
+        SDL_Log("KMSDRM rotated present: ignoring unknown SDL_KMSDRM_ROTATE_EXPERIMENT '%s'", value);
+        return;
+    }
+    if (experiment == KMSDRM_ROTATE_EXPERIMENT_NONE) {
+        return;
+    }
+    if (!KMSDRM_RotateGL_LoadExp(&rot->exp, KMSDRM_Rotate_GetProc, _this)) {
+        SDL_Log("KMSDRM rotated present experiment %s: GLES2 entry points are missing; not applied",
+                KMSDRM_RotateGL_ExperimentName(experiment));
+        return;
+    }
+    if (experiment == KMSDRM_ROTATE_EXPERIMENT_TWIDDLE) {
+        KMSDRM_RotationLogicalSize(rot->rotation, rot->pw, rot->ph, &rot->lw, &rot->lh);
+        rot->copy_texture = KMSDRM_RotateGL_CreateCopyTexture(&rot->gl, &rot->exp, rot->lw, rot->lh);
+        if (!rot->copy_texture) {
+            SDL_Log("KMSDRM rotated present experiment twiddle: could not create the %dx%d copy texture; not applied",
+                    rot->lw, rot->lh);
+            return;
+        }
+    }
+    rot->experiment = experiment;
+    SDL_Log("KMSDRM rotated present experiment: %s", KMSDRM_RotateGL_ExperimentName(experiment));
 }
 
 void KMSDRM_Rotate_Destroy(SDL_VideoDevice *_this, SDL_Window *window)
@@ -271,6 +314,7 @@ bool KMSDRM_Rotate_Create(SDL_VideoDevice *_this, SDL_Window *window, int rotati
         SDL_SetError("KMSDRM rotated present: could not build the rotate program");
         goto fail;
     }
+    KMSDRM_Rotate_SetupExperiment(_this, rot);
     egl->eglMakeCurrent(egl->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
     SDL_LogDebug(SDL_LOG_CATEGORY_VIDEO, "KMSDRM rotated present: %d degrees, %dx%d panel, fences %s",
@@ -282,19 +326,19 @@ fail:
     return false;
 }
 
-static GLuint KMSDRM_Rotate_TextureForBO(SDL_VideoDevice *_this, struct KMSDRM_Rotate *rot, struct gbm_bo *bo)
+static KMSDRM_RotateImage *KMSDRM_Rotate_ImageForBO(SDL_VideoDevice *_this, struct KMSDRM_Rotate *rot, struct gbm_bo *bo)
 {
     KMSDRM_RotateImage *slot;
     int i;
 
     for (i = 0; i < rot->num_images; ++i) {
         if (rot->images[i].bo == bo) {
-            return rot->images[i].texture;
+            return &rot->images[i];
         }
     }
     if (rot->num_images == KMSDRM_ROTATE_MAX_IMAGES) {
         SDL_SetError("KMSDRM rotated present: more application buffers than expected");
-        return 0;
+        return NULL;
     }
 
     slot = &rot->images[rot->num_images];
@@ -305,7 +349,7 @@ static GLuint KMSDRM_Rotate_TextureForBO(SDL_VideoDevice *_this, struct KMSDRM_R
                                          EGL_NATIVE_PIXMAP_KHR, (EGLClientBuffer)bo, NULL);
     if (slot->image == EGL_NO_IMAGE_KHR) {
         SDL_EGL_SetError("Could not create an EGLImage for the application buffer", "eglCreateImageKHR");
-        return 0;
+        return NULL;
     }
 
     slot->texture = 0;
@@ -320,12 +364,30 @@ static GLuint KMSDRM_Rotate_TextureForBO(SDL_VideoDevice *_this, struct KMSDRM_R
         rot->eglDestroyImageKHR(_this->egl_data->egl_display, slot->image);
         SDL_zerop(slot);
         SDL_SetError("KMSDRM rotated present: could not bind the application buffer as a texture");
-        return 0;
+        return NULL;
     }
 
     slot->bo = bo;
     ++rot->num_images;
-    return slot->texture;
+    return slot;
+}
+
+/* SDL_KMSDRM_ROTATE_EXPERIMENT=twiddle: copy the application's frame into the
+   rotate context's own texture and return that texture, or return `slot`'s
+   texture (and stop the experiment, saying so) if the copy cannot be made. */
+static GLuint KMSDRM_Rotate_TwiddleCopy(struct KMSDRM_Rotate *rot, KMSDRM_RotateImage *slot)
+{
+    if (!slot->read_fbo) {
+        slot->read_fbo = KMSDRM_RotateGL_CreateReadFramebuffer(&rot->gl, &rot->exp, slot->texture);
+    }
+    if (!slot->read_fbo ||
+        !KMSDRM_RotateGL_CopyToTexture(&rot->gl, &rot->exp, slot->read_fbo, rot->copy_texture, rot->lw, rot->lh)) {
+        SDL_Log("KMSDRM rotated present experiment twiddle: the copy failed (%s); drawing without it from now on",
+                slot->read_fbo ? "glCopyTexSubImage2D" : "incomplete read framebuffer");
+        rot->experiment = KMSDRM_ROTATE_EXPERIMENT_NONE;
+        return slot->texture;
+    }
+    return rot->copy_texture;
 }
 
 bool KMSDRM_Rotate_BeginPresent(SDL_VideoDevice *_this, SDL_Window *window)
@@ -337,6 +399,7 @@ bool KMSDRM_Rotate_BeginPresent(SDL_VideoDevice *_this, SDL_Window *window)
     Uint64 stage_start = KMSDRM_Timing_Now(timing);
     EGLSyncKHR app_fence = EGL_NO_SYNC_KHR;
     struct gbm_bo *bo;
+    KMSDRM_RotateImage *slot;
     GLuint texture;
 
     if (!rot) {
@@ -392,13 +455,17 @@ bool KMSDRM_Rotate_BeginPresent(SDL_VideoDevice *_this, SDL_Window *window)
         egl->eglDestroySyncKHR(egl->egl_display, app_fence);
     }
 
-    texture = KMSDRM_Rotate_TextureForBO(_this, rot, bo);
-    if (!texture) {
+    slot = KMSDRM_Rotate_ImageForBO(_this, rot, bo);
+    if (!slot) {
         KMSDRM_gbm_surface_release_buffer(windata->gs, bo);
         return false;
     }
+    texture = slot->texture;
+    if (rot->experiment == KMSDRM_ROTATE_EXPERIMENT_TWIDDLE) {
+        texture = KMSDRM_Rotate_TwiddleCopy(rot, slot);
+    }
 
-    KMSDRM_RotateGL_Draw(&rot->gl, texture, rot->rotation, rot->pw, rot->ph);
+    KMSDRM_RotateGL_DrawExperiment(&rot->gl, &rot->exp, rot->experiment, texture, rot->rotation, rot->pw, rot->ph);
 
     /* The fence that says this pass no longer reads `bo`. The present's
        eglSwapBuffers flushes too, but flush here so the fence cannot depend

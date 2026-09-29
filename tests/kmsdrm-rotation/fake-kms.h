@@ -25,6 +25,7 @@ typedef struct FakeKmsSurfaceReport
     int swaps;            // eglSwapBuffers on the EGL surface made from it
     int locked_now;
     int locked_max;
+    int clears;           // glClear with framebuffer 0 bound while drawing into it
 } FakeKmsSurfaceReport;
 
 typedef struct FakeKmsDraw
@@ -61,6 +62,13 @@ typedef struct FakeKmsReport
 
     int draws;
     FakeKmsDraw last_draw;
+
+    /* tsp-mc9m.41.924.16.13.3, SDL_KMSDRM_ROTATE_EXPERIMENT: glCopyTexSubImage2D
+       calls (the copy texture then samples as the read framebuffer's image), and
+       eglGetProcAddress lookups of the entry points only an experiment uses
+       (framebuffer objects, the copy, glTexImage2D). The ordinary pass makes none. */
+    int copies;
+    int experiment_proc_requests;
 
     int syncs_alive;
     int cross_context_waits;   // eglWaitSyncKHR on a fence made in another context
