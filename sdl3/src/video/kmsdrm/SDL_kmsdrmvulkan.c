@@ -33,6 +33,7 @@
 #include "SDL_kmsdrmvideo.h"
 #include "SDL_kmsdrmdyn.h"
 #include "SDL_kmsdrmvulkan.h"
+#include "SDL_kmsdrmorientation.h"
 
 #include <sys/ioctl.h>
 
@@ -207,6 +208,14 @@ bool KMSDRM_Vulkan_CreateSurface(SDL_VideoDevice *_this,
     int display_index = SDL_GetDisplayIndex(SDL_GetDisplayForWindow(window));
     int i, j;
 
+    /* PocketForge: a rotated display reports its logical size, but the rotated
+       present is GL-only; a Vulkan display-plane surface stays panel-native and
+       the application owns any transformation. */
+    SDL_DisplayData *dispdata = SDL_GetDisplayDriverDataForWindow(window);
+    const int surface_rotation = dispdata ? dispdata->present_rotation : 0;
+    const uint32_t surface_w = (uint32_t)(KMSDRM_RotationSwapsAxes(surface_rotation) ? window->h : window->w);
+    const uint32_t surface_h = (uint32_t)(KMSDRM_RotationSwapsAxes(surface_rotation) ? window->w : window->h);
+
     // Get the function pointers for the functions we will use.
     PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr =
         (PFN_vkGetInstanceProcAddr)_this->vulkan_config.vkGetInstanceProcAddr;
@@ -351,8 +360,8 @@ bool KMSDRM_Vulkan_CreateSurface(SDL_VideoDevice *_this,
        scanout a region bigger than the window (we would be reading past the
        buffer, and Vulkan would give us a confusing VK_ERROR_SURFACE_LOST_KHR). */
     for (i = 0; i < mode_count; i++) {
-        if (mode_props[i].parameters.visibleRegion.width == window->w &&
-            mode_props[i].parameters.visibleRegion.height == window->h) {
+        if (mode_props[i].parameters.visibleRegion.width == surface_w &&
+            mode_props[i].parameters.visibleRegion.height == surface_h) {
             display_mode_props = mode_props[i];
             mode_found = true;
             break;
@@ -370,8 +379,8 @@ bool KMSDRM_Vulkan_CreateSurface(SDL_VideoDevice *_this,
            This won't work for some video chips atm (like Pi's VideoCore) so these are limited
            to supported resolutions. Don't try to use "closest" resolutions either, because
            those are often bigger than the window size, thus causing out-of-bunds scanout. */
-        new_mode_parameters.visibleRegion.width = window->w;
-        new_mode_parameters.visibleRegion.height = window->h;
+        new_mode_parameters.visibleRegion.width = surface_w;
+        new_mode_parameters.visibleRegion.height = surface_h;
         /* SDL (and DRM, if we look at drmModeModeInfo vrefresh) uses plain integer Hz for
            display mode refresh rate, but Vulkan expects higher precision. */
         new_mode_parameters.refreshRate = (uint32_t)(window->current_fullscreen_mode.refresh_rate * 1000);
@@ -469,8 +478,8 @@ bool KMSDRM_Vulkan_CreateSurface(SDL_VideoDevice *_this,
     // Let's finally create the Vulkan surface!
     /********************************************/
 
-    image_size.width = window->w;
-    image_size.height = window->h;
+    image_size.width = surface_w;
+    image_size.height = surface_h;
 
     SDL_zero(display_plane_surface_create_info);
     display_plane_surface_create_info.sType = VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR;
