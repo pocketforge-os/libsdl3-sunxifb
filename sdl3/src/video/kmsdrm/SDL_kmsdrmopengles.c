@@ -26,6 +26,7 @@
 #include "SDL_kmsdrmvideo.h"
 #include "SDL_kmsdrmopengles.h"
 #include "SDL_kmsdrmdyn.h"
+#include "SDL_kmsdrmrotate.h"
 #include <errno.h>
 
 #define VOID2U64(x) ((uint64_t)(size_t)(x))
@@ -144,7 +145,7 @@ static bool KMSDRM_GLES_SwapWindowFenced(SDL_VideoDevice *_this, SDL_Window * wi
     /* the new front buffer. (Remember that won't really happen until */
     /* we request a pageflip at the KMS level and it completes.       */
     /******************************************************************/
-    if (! _this->egl_data->eglSwapBuffers(_this->egl_data->egl_display, windata->egl_surface)) {
+    if (! _this->egl_data->eglSwapBuffers(_this->egl_data->egl_display, windata->present_egl_surface)) {
         return SDL_EGL_SetError("Failed to swap EGL buffers", "eglSwapBuffers");
     }
 
@@ -170,7 +171,7 @@ static bool KMSDRM_GLES_SwapWindowFenced(SDL_VideoDevice *_this, SDL_Window * wi
        to draw on), and get a handle to it to request the pageflip on it.
        REMEMBER that gbm_surface_lock_front_buffer() ALWAYS has to be
        called after eglSwapBuffers(). */
-    windata->next_bo = KMSDRM_gbm_surface_lock_front_buffer(windata->gs);
+    windata->next_bo = KMSDRM_gbm_surface_lock_front_buffer(windata->present_gs);
     if (!windata->next_bo) {
         return SDL_SetError("Failed to lock frontbuffer");
     }
@@ -197,8 +198,8 @@ static bool KMSDRM_GLES_SwapWindowFenced(SDL_VideoDevice *_this, SDL_Window * wi
     info.plane = dispdata->display_plane;
     info.crtc_id = dispdata->crtc.crtc->crtc_id;
     info.fb_id = fb->fb_id;
-    info.src_w = window->w;  // !!! FIXME: was windata->src_w in the original atomic patch
-    info.src_h = window->h;  // !!! FIXME: was windata->src_h in the original atomic patch
+    info.src_w = windata->rotation ? dispdata->mode.hdisplay : window->w;  // !!! FIXME: was windata->src_w in the original atomic patch
+    info.src_h = windata->rotation ? dispdata->mode.vdisplay : window->h;  // !!! FIXME: was windata->src_h in the original atomic patch
     info.crtc_w = dispdata->mode.hdisplay;  // !!! FIXME: was windata->output_w in the original atomic patch
     info.crtc_h = dispdata->mode.vdisplay;  // !!! FIXME: was windata->output_h in the original atomic patch
     info.crtc_x = 0;  // !!! FIXME: was windata->output_x in the original atomic patch
@@ -258,7 +259,7 @@ static bool KMSDRM_GLES_SwapWindowFenced(SDL_VideoDevice *_this, SDL_Window * wi
     /* Release the previous front buffer so EGL can chose it as back buffer
        and render on it again. */
     if (windata->bo) {
-        KMSDRM_gbm_surface_release_buffer(windata->gs, windata->bo);
+        KMSDRM_gbm_surface_release_buffer(windata->present_gs, windata->bo);
     }
     /* Take note of the buffer about to become front buffer, so next
        time we come here we can free it like we just did with the previous
@@ -309,13 +310,13 @@ static bool KMSDRM_GLES_SwapWindowDoubleBuffered(SDL_VideoDevice *_this, SDL_Win
     /* Mark, at EGL level, the buffer that we want to become the new front buffer.
        It won't really happen until we request a pageflip at the KMS level and it
        completes. */
-    if (! _this->egl_data->eglSwapBuffers(_this->egl_data->egl_display, windata->egl_surface)) {
+    if (! _this->egl_data->eglSwapBuffers(_this->egl_data->egl_display, windata->present_egl_surface)) {
         return SDL_EGL_SetError("Failed to swap EGL buffers", "eglSwapBuffers");
     }
     /* Lock the buffer that is marked by eglSwapBuffers() to become the next front buffer
        (so it can not be chosen by EGL as back buffer to draw on), and get a handle to it,
        to request the pageflip on it. */
-    windata->next_bo = KMSDRM_gbm_surface_lock_front_buffer(windata->gs);
+    windata->next_bo = KMSDRM_gbm_surface_lock_front_buffer(windata->present_gs);
     if (!windata->next_bo) {
         return SDL_SetError("Failed to lock frontbuffer");
      }
@@ -342,8 +343,8 @@ static bool KMSDRM_GLES_SwapWindowDoubleBuffered(SDL_VideoDevice *_this, SDL_Win
     info.plane = dispdata->display_plane;
     info.crtc_id = dispdata->crtc.crtc->crtc_id;
     info.fb_id = fb->fb_id;
-    info.src_w = window->w;  // !!! FIXME: was windata->src_w in the original atomic patch
-    info.src_h = window->h;  // !!! FIXME: was windata->src_h in the original atomic patch
+    info.src_w = windata->rotation ? dispdata->mode.hdisplay : window->w;  // !!! FIXME: was windata->src_w in the original atomic patch
+    info.src_h = windata->rotation ? dispdata->mode.vdisplay : window->h;  // !!! FIXME: was windata->src_h in the original atomic patch
     info.crtc_w = dispdata->mode.hdisplay;  // !!! FIXME: was windata->output_w in the original atomic patch
     info.crtc_h = dispdata->mode.vdisplay;  // !!! FIXME: was windata->output_h in the original atomic patch
     info.crtc_x = 0;  // !!! FIXME: was windata->output_x in the original atomic patch
@@ -375,7 +376,7 @@ static bool KMSDRM_GLES_SwapWindowDoubleBuffered(SDL_VideoDevice *_this, SDL_Win
 
     /* Release last front buffer so EGL can chose it as back buffer and render on it again. */
     if (windata->bo) {
-        KMSDRM_gbm_surface_release_buffer(windata->gs, windata->bo);
+        KMSDRM_gbm_surface_release_buffer(windata->present_gs, windata->bo);
     }
 
     /* Take note of current front buffer, so we can free it next time we come here. */
@@ -416,7 +417,7 @@ static bool KMSDRM_GLES_SwapWindowLegacy(SDL_VideoDevice *_this, SDL_Window *win
 
     // Release the previous front buffer
     if (windata->bo) {
-        KMSDRM_gbm_surface_release_buffer(windata->gs, windata->bo);
+        KMSDRM_gbm_surface_release_buffer(windata->present_gs, windata->bo);
     }
 
     windata->bo = windata->next_bo;
@@ -424,14 +425,14 @@ static bool KMSDRM_GLES_SwapWindowLegacy(SDL_VideoDevice *_this, SDL_Window *win
     /* Mark a buffer to become the next front buffer.
        This won't happen until pageflip completes. */
     if (!(_this->egl_data->eglSwapBuffers(_this->egl_data->egl_display,
-                                          windata->egl_surface))) {
+                                          windata->present_egl_surface))) {
         return SDL_SetError("eglSwapBuffers failed");
     }
 
     /* From the GBM surface, get the next BO to become the next front buffer,
        and lock it so it can't be allocated as a back buffer (to prevent EGL
        from drawing into it!) */
-    windata->next_bo = KMSDRM_gbm_surface_lock_front_buffer(windata->gs);
+    windata->next_bo = KMSDRM_gbm_surface_lock_front_buffer(windata->present_gs);
     if (!windata->next_bo) {
         return SDL_SetError("Could not lock front buffer on GBM surface");
     }
@@ -498,6 +499,41 @@ static bool KMSDRM_GLES_SwapWindowLegacy(SDL_VideoDevice *_this, SDL_Window *win
     return true;
 }
 
+/* PocketForge: present a window whose panel is mounted sideways. The frame
+   the application drew into its logical-size surface is copied, rotated, into
+   the panel-native present surface by SDL_kmsdrmrotate.c, and the unchanged
+   swap path (atomic fenced, atomic double-buffered or legacy) then flips the
+   present surface, with the rotate context current in place of the
+   application's. */
+static bool KMSDRM_GLES_SwapWindowRotated(SDL_VideoDevice *_this, SDL_Window *window)
+{
+    SDL_WindowData *windata = (SDL_WindowData *) window->internal;
+    SDL_GLContext app_context = SDL_GL_GetCurrentContext();
+    bool result;
+
+    // Skip the swap if we've switched away to another VT
+    if (windata->egl_surface == EGL_NO_SURFACE) {
+        // Wait a bit, throttling to ~100 FPS
+        SDL_Delay(10);
+        return true;
+    }
+
+    /* A pending mode or size change recreates the application and present
+       surfaces. The frame just drawn went to the old application surface, so
+       it is dropped; the first present on the new surfaces sets the mode, as
+       windata->bo is NULL again. */
+    if (windata->egl_surface_dirty) {
+        return KMSDRM_CreateSurfaces(_this, window);
+    }
+
+    result = KMSDRM_Rotate_BeginPresent(_this, window);
+    if (result) {
+        result = windata->swap_window(_this, window);
+    }
+    KMSDRM_Rotate_EndPresent(_this, window, app_context);
+    return result;
+}
+
 bool KMSDRM_GLES_SwapWindow(SDL_VideoDevice *_this, SDL_Window * window)
 {
     SDL_WindowData *windata = (SDL_WindowData *) window->internal;
@@ -514,6 +550,9 @@ bool KMSDRM_GLES_SwapWindow(SDL_VideoDevice *_this, SDL_Window * window)
         } else {
             windata->swap_window = KMSDRM_GLES_SwapWindowLegacy;
         }
+    }
+    if (windata->rotation != 0) {
+        return KMSDRM_GLES_SwapWindowRotated(_this, window);
     }
     return windata->swap_window(_this, window);
 }

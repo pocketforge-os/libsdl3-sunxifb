@@ -156,6 +156,13 @@ struct SDL_DisplayData
     EGLSyncKHR gpu_fence;
 
     bool default_cursor_init;
+
+    /* PocketForge: the connector's "panel orientation" in degrees (see
+       SDL_kmsdrmorientation.h), and the rotation this backend applies at
+       present (0 when SDL_KMSDRM_PRESENT_ROTATION is "0"). drmModeModeInfo
+       values stay panel-native; SDL-facing sizes are rotated. */
+    int panel_orientation;
+    int present_rotation;
 };
 
 struct SDL_WindowData
@@ -177,6 +184,16 @@ struct SDL_WindowData
 
     /* This dictates what approach we'll use for SwapBuffers. */
     bool (*swap_window)(SDL_VideoDevice *_this, SDL_Window *window);
+
+    /* PocketForge rotated present. The swap paths flip present_gs's buffers
+       (bo/next_bo belong to it) and swap present_egl_surface. Unrotated, these
+       are gs and egl_surface themselves. Rotated (rotation != 0), gs and
+       egl_surface are the application's logical-size surface and the present
+       pair is the panel-native one that SDL_kmsdrmrotate.c renders into. */
+    int rotation;
+    struct gbm_surface *present_gs;
+    EGLSurface present_egl_surface;
+    struct KMSDRM_Rotate *rotate;
 };
 
 typedef struct KMSDRM_FBInfo

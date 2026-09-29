@@ -47,6 +47,8 @@
 #include "SDL_kmsdrmvideo.h"
 #include "SDL_kmsdrmopengles.h"
 #include "SDL_kmsdrmvulkan.h"
+#include "SDL_kmsdrmorientation.h"
+#include "SDL_kmsdrmrotate.h"
 #include <dirent.h>
 #include <errno.h>
 #include <poll.h>
@@ -1064,35 +1066,37 @@ static bool KMSDRM_CrtcGetVrr(uint32_t drm_fd, uint32_t crtc_id)
     return false;
 }
 
-static int KMSDRM_CrtcGetOrientation(uint32_t drm_fd, uint32_t crtc_id)
+/* PocketForge: the CURRENT value of the connector's "panel orientation" enum,
+   in degrees (SDL_kmsdrmorientation.h), from the properties AddDisplay already
+   loaded. Upstream passed the CRTC id as a connector object id, so the lookup
+   failed, and read enums[0] -- the first enum *definition*, "Normal" -- rather
+   than the property's value, so it always reported 0. */
+static int KMSDRM_ConnectorGetOrientation(const KMSDRM_connector *connector)
 {
-    bool found = false;
-    int orientation = 0;
+    uint32_t i;
+    int j;
 
-    drmModeObjectPropertiesPtr props = KMSDRM_drmModeObjectGetProperties(drm_fd, crtc_id, DRM_MODE_OBJECT_CONNECTOR);
-    if (props) {
-        for (uint32_t i = 0; !found && i < props->count_props; ++i) {
-            drmModePropertyPtr prop = KMSDRM_drmModeGetProperty(drm_fd, props->props[i]);
-            if (prop) {
-                if (SDL_strcasecmp(prop->name, "panel orientation") == 0 && (prop->flags & DRM_MODE_PROP_ENUM)) {
-                    if (prop->count_enums) {
-                        // "Normal" is the default of no rotation (0 degrees)
-                        if (SDL_strcmp(prop->enums[0].name, "Left Side Up") == 0) {
-                            orientation = 90;
-                        } else if (SDL_strcmp(prop->enums[0].name, "Upside Down") == 0) {
-                            orientation = 180;
-                        } else if (SDL_strcmp(prop->enums[0].name, "Right Side Up") == 0) {
-                            orientation = 270;
-                        }
-                    }
-                    found = true;
-                }
-                KMSDRM_drmModeFreeProperty(prop);
+    if (!connector->props || !connector->props_info) {
+        return 0;
+    }
+
+    for (i = 0; i < connector->props->count_props; i++) {
+        const drmModePropertyRes *prop = connector->props_info[i];
+
+        if (!prop || !(prop->flags & DRM_MODE_PROP_ENUM) ||
+            SDL_strcasecmp(prop->name, "panel orientation") != 0) {
+            continue;
+        }
+
+        for (j = 0; j < prop->count_enums; j++) {
+            if (prop->enums[j].value == connector->props->prop_values[i]) {
+                return KMSDRM_PanelOrientationDegrees(prop->enums[j].name);
             }
         }
-        KMSDRM_drmModeFreeObjectProperties(props);
+        return 0;
     }
-    return orientation;
+
+    return 0;
 }
 
 /* Gets a DRM connector, builds an SDL_Display with it, and adds it to the
@@ -1109,7 +1113,6 @@ static void KMSDRM_AddDisplay(SDL_VideoDevice *_this, drmModeConnector *conn, dr
     SDL_DisplayID display_id;
     SDL_PropertiesID display_properties;
     char name_fmt[64];
-    int orientation;
     int mode_index;
     int i, j;
     int ret = 0;
@@ -1306,6 +1309,16 @@ static void KMSDRM_AddDisplay(SDL_VideoDevice *_this, drmModeConnector *conn, dr
         dispdata->connector.props->props[i]);
     }
 
+    /* PocketForge: a panel mounted sideways (or upside down) is presented
+       rotated, and SDL reports its logical size, unless the application opts
+       out with SDL_KMSDRM_PRESENT_ROTATION=0. */
+    dispdata->panel_orientation = KMSDRM_ConnectorGetOrientation(&dispdata->connector);
+    dispdata->present_rotation = 0;
+    if (dispdata->panel_orientation != 0 &&
+        SDL_GetHintBoolean(SDL_HINT_KMSDRM_PRESENT_ROTATION, true)) {
+        dispdata->present_rotation = dispdata->panel_orientation;
+    }
+
     /*****************************************/
     // Part 2: setup the SDL_Display itself.
     /*****************************************/
@@ -1322,8 +1335,9 @@ static void KMSDRM_AddDisplay(SDL_VideoDevice *_this, drmModeConnector *conn, dr
     modedata->mode_index = mode_index;
 
     display.internal = dispdata;
-    display.desktop_mode.w = dispdata->mode.hdisplay;
-    display.desktop_mode.h = dispdata->mode.vdisplay;
+    KMSDRM_RotationLogicalSize(dispdata->present_rotation,
+                               dispdata->mode.hdisplay, dispdata->mode.vdisplay,
+                               &display.desktop_mode.w, &display.desktop_mode.h);
     CalculateRefreshRate(&dispdata->mode, &display.desktop_mode.refresh_rate_numerator, &display.desktop_mode.refresh_rate_denominator);
     display.desktop_mode.format = SDL_PIXELFORMAT_ARGB8888;
     display.desktop_mode.internal = modedata;
@@ -1338,9 +1352,15 @@ static void KMSDRM_AddDisplay(SDL_VideoDevice *_this, drmModeConnector *conn, dr
         goto cleanup;
     }
 
-    orientation = KMSDRM_CrtcGetOrientation(viddata->drm_fd, crtc->crtc_id);
+    /* PocketForge: the display keeps the TRUE panel orientation (a fact about
+       the panel, needed by Vulkan windows, which stay panel-native). What SDL
+       rotates and what the application still owns are per window: see the
+       orientation contract in SDL_kmsdrmrotate.h. */
     display_properties = SDL_GetDisplayProperties(display_id);
-    SDL_SetNumberProperty(display_properties, SDL_PROP_DISPLAY_KMSDRM_PANEL_ORIENTATION_NUMBER, orientation);
+    SDL_SetNumberProperty(display_properties, SDL_PROP_DISPLAY_KMSDRM_PANEL_ORIENTATION_NUMBER,
+                          dispdata->panel_orientation);
+    SDL_SetNumberProperty(display_properties, SDL_PROP_DISPLAY_KMSDRM_PRESENT_ROTATION_NUMBER,
+                          dispdata->present_rotation);
 
 #ifdef DEBUG_KMSDRM  // Use this if you ever need to see info on all available planes.
     get_planes_info(_this, dispdata);
@@ -1696,15 +1716,16 @@ static void KMSDRM_DestroySurfaces(SDL_VideoDevice *_this, SDL_Window *window)
     // Destroy the GBM buffers
     /***************************/
 
+    // bo and next_bo are the present surface's (the application's when unrotated).
     if (windata->bo) {
         if (windata->bo != windata->next_bo) {
-            KMSDRM_gbm_surface_release_buffer(windata->gs, windata->bo);
+            KMSDRM_gbm_surface_release_buffer(windata->present_gs, windata->bo);
         }
         windata->bo = NULL;
     }
 
     if (windata->next_bo) {
-        KMSDRM_gbm_surface_release_buffer(windata->gs, windata->next_bo);
+        KMSDRM_gbm_surface_release_buffer(windata->present_gs, windata->next_bo);
         windata->next_bo = NULL;
     }
 
@@ -1713,6 +1734,11 @@ static void KMSDRM_DestroySurfaces(SDL_VideoDevice *_this, SDL_Window *window)
     /***************************/
 
     SDL_EGL_MakeCurrent(_this, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+
+    // PocketForge: the rotated present's own surface and context.
+    KMSDRM_Rotate_Destroy(_this, window);
+    windata->present_gs = NULL;
+    windata->present_egl_surface = EGL_NO_SURFACE;
 
     if (windata->egl_surface != EGL_NO_SURFACE) {
         SDL_EGL_DestroySurface(_this, windata->egl_surface);
@@ -1759,7 +1785,11 @@ static void KMSDRM_DirtySurfaces(SDL_Window *window)
        or SetWindowFullscreen, send a fake event for now since the actual
        recreation is deferred */
     KMSDRM_GetModeToSet(window, &mode);
-    SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESIZED, mode.hdisplay, mode.vdisplay);
+    {
+        int w, h;
+        KMSDRM_RotationLogicalSize(windata->rotation, mode.hdisplay, mode.vdisplay, &w, &h);
+        SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESIZED, w, h);
+    }
 }
 
 /* This determines the size of the fb, which comes from the GBM surface
@@ -1773,6 +1803,7 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
 
     uint32_t surface_fmt = GBM_FORMAT_ARGB8888;
     uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
+    int surface_w, surface_h;
 
     EGLContext egl_context;
 
@@ -1797,13 +1828,18 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
      */
     KMSDRM_GetModeToSet(window, &dispdata->mode);
 
+    /* PocketForge: the application's surface has the logical size; with a
+       rotated present the panel-native one is made by KMSDRM_Rotate_Create. */
+    KMSDRM_RotationLogicalSize(windata->rotation, dispdata->mode.hdisplay, dispdata->mode.vdisplay,
+                               &surface_w, &surface_h);
+
     windata->gs = KMSDRM_gbm_surface_create(viddata->gbm_dev,
-                                            dispdata->mode.hdisplay, dispdata->mode.vdisplay,
+                                            surface_w, surface_h,
                                             surface_fmt, surface_flags);
     if (!windata->gs && errno == ENOSYS) {
         // Try again without the scanout flags, needed on NVIDIA drivers
         windata->gs = KMSDRM_gbm_surface_create(viddata->gbm_dev,
-                                                dispdata->mode.hdisplay, dispdata->mode.vdisplay,
+                                                surface_w, surface_h,
                                                 surface_fmt, 0);
     }
     if (!windata->gs) {
@@ -1821,20 +1857,44 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
         goto cleanup;
     }
 
+    if (windata->rotation != 0) {
+        if (!KMSDRM_Rotate_Create(_this, window, windata->rotation,
+                                  dispdata->mode.hdisplay, dispdata->mode.vdisplay)) {
+            result = false;
+            goto cleanup;
+        }
+    } else {
+        windata->present_gs = windata->gs;
+        windata->present_egl_surface = windata->egl_surface;
+    }
+
     /* Current context passing to EGL is now done here. If something fails,
        go back to delayed SDL_EGL_MakeCurrent() call in SwapWindow. */
     egl_context = (EGLContext)SDL_GL_GetCurrentContext();
     result = SDL_EGL_MakeCurrent(_this, windata->egl_surface, egl_context);
 
-    SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESIZED,
-                        dispdata->mode.hdisplay, dispdata->mode.vdisplay);
+    SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESIZED, surface_w, surface_h);
 
     windata->egl_surface_dirty = false;
 
 cleanup:
 
     if (!result) {
-        // Error (complete) cleanup.
+        /* Error (complete) cleanup. PocketForge: everything this function made
+           is torn down, whichever step failed (including the final
+           SDL_EGL_MakeCurrent): the rotated present's surface and context
+           first (it may hold application buffers), then the application's EGL
+           surface, then its GBM surface. A later rebuild starts from nothing,
+           so windata->rotate can never be overwritten while alive. No bo or
+           next_bo exists here: any previous surfaces were destroyed above. */
+        KMSDRM_Rotate_Destroy(_this, window);
+        windata->present_gs = NULL;
+        windata->present_egl_surface = EGL_NO_SURFACE;
+        if (windata->egl_surface != EGL_NO_SURFACE) {
+            SDL_EGL_MakeCurrent(_this, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            SDL_EGL_DestroySurface(_this, windata->egl_surface);
+            windata->egl_surface = EGL_NO_SURFACE;
+        }
         if (windata->gs) {
             KMSDRM_gbm_surface_destroy(windata->gs);
             windata->gs = NULL;
@@ -1945,8 +2005,9 @@ bool KMSDRM_GetDisplayModes(SDL_VideoDevice *_this, SDL_VideoDisplay *display)
         }
 
         SDL_zero(mode);
-        mode.w = conn->modes[i].hdisplay;
-        mode.h = conn->modes[i].vdisplay;
+        KMSDRM_RotationLogicalSize(dispdata->present_rotation,
+                                   conn->modes[i].hdisplay, conn->modes[i].vdisplay,
+                                   &mode.w, &mode.h);
         CalculateRefreshRate(&conn->modes[i], &mode.refresh_rate_numerator, &mode.refresh_rate_denominator);
         mode.format = SDL_PIXELFORMAT_ARGB8888;
         mode.internal = modedata;
@@ -2165,6 +2226,9 @@ bool KMSDRM_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_Propert
             dispdata->fullscreen_mode = dispdata->original_mode;
         }
 
+        // PocketForge: GL windows on a sideways panel are presented rotated.
+        windata->rotation = dispdata->present_rotation;
+
         /* Create the window surfaces with the size we have just chosen.
            Needs the window driverdata in place. */
         if (!KMSDRM_CreateSurfaces(_this, window)) {
@@ -2196,6 +2260,13 @@ bool KMSDRM_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_Propert
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_KMSDRM_DEVICE_INDEX_NUMBER, viddata->devindex);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_KMSDRM_DRM_FD_NUMBER, viddata->drm_fd);
     SDL_SetPointerProperty(props, SDL_PROP_WINDOW_KMSDRM_GBM_DEVICE_POINTER, viddata->gbm_dev);
+
+    /* PocketForge: this window's orientation contract (SDL_kmsdrmrotate.h).
+       windata->rotation is set only for GL windows; a Vulkan window stays
+       panel-native, so its application owns the whole panel orientation. */
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_KMSDRM_PRESENT_ROTATION_NUMBER, windata->rotation);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_KMSDRM_APP_ROTATION_NUMBER,
+                          (dispdata->panel_orientation - windata->rotation + 360) % 360);
 
     if ((window->flags & SDL_WINDOW_NOT_FOCUSABLE) == 0) {
         /* Focus on the newly created window.

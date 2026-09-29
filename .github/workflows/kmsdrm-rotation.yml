@@ -1,0 +1,73 @@
+# kmsdrm-rotation - hermetic tests of the KMSDRM rotated present
+# (tsp-mc9m.41.924.16.12): a panel whose connector "panel orientation" is not
+# Normal gets a logical (landscape) display, and SDL rotates each frame into a
+# panel-native scanout buffer. tests/kmsdrm-rotation/run.sh builds this tree's
+# SDL and runs it over a fake libdrm/GBM/EGL/GLES2 stack, plus the rotate pass
+# on Mesa llvmpipe, then shows the base commit's SDL fails the same test.
+#
+# Containers only, on the ephemeral pf-builder-vm runners (owner directive
+# 2026-09-28): the slot supplies Docker and nothing else; the run has no network,
+# the source is mounted read-only, and no device or DRM node is touched.
+name: kmsdrm-rotation
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+    paths:
+      - .github/workflows/kmsdrm-rotation.yml
+      - sdl3/src/video/kmsdrm/**
+      - sdl3/src/video/SDL_egl.c
+      - sdl3/src/video/SDL_egl_c.h
+      - tests/kmsdrm-rotation/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kmsdrm-rotation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  kmsdrm-rotation:
+    # Fork guard: PR code from any other repository never reaches the builder.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, pf-builder-vm]
+    timeout-minutes: 60
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+    steps:
+      - name: Check out the tested commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/kmsdrm-rotation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf -- "$root"
+          mkdir -p -- "$root"
+          echo "CI_ROOT=$root" >> "$GITHUB_ENV"
+          echo "CI_IMAGE=kmsdrm-rotation:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+          git init --quiet "$root/src"
+          # The token is used for these fetches only; it is not stored in the clone.
+          for sha in "$HEAD_SHA" "$BASE_SHA"; do
+            git -C "$root/src" -c credential.helper= fetch --quiet --no-tags \
+              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$sha"
+          done
+          git -C "$root/src" checkout --quiet --detach "$HEAD_SHA"
+          test "$(git -C "$root/src" rev-parse HEAD)" = "$HEAD_SHA"
+          git -C "$root/src" cat-file -e "$BASE_SHA^{commit}"
+          echo "head=$HEAD_SHA base=$BASE_SHA runner=$RUNNER_NAME"
+
+      - name: Build the test container
+        run: docker build --pull -t "$CI_IMAGE" -f "$CI_ROOT/src/tests/kmsdrm-rotation/Dockerfile" "$CI_ROOT/src/tests/kmsdrm-rotation"
+
+      - name: Run the tests (no network, read-only source)
+        run: |
+          docker run --rm --network none -e BASE_SHA \
+            -v "$CI_ROOT/src:/src:ro" "$CI_IMAGE" bash /src/tests/kmsdrm-rotation/run.sh
+
+      - name: Producer-side cleanup
+        if: always()
+        run: |
+          if [ -n "${CI_IMAGE:-}" ]; then docker image rm -f "$CI_IMAGE" >/dev/null 2>&1 || true; fi
+          if [ -n "${CI_ROOT:-}" ]; then rm -rf -- "$CI_ROOT"; fi
