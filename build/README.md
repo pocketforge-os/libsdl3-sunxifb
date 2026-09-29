@@ -75,9 +75,16 @@ manufacture short-name symlinks — the toolchain has zero by design.
 ## Verify a built artifact
 
 The canonical `build/build-libsdl3.sh` recipe disables both SDL pkg-config
-RPATH handling and CMake build/install RPATH generation. It enables dynamic
-KMSDRM only for `PF_GPU_MODEL=open`; the default/closed build keeps KMSDRM off
-and retains sunxifb. Open configuration also restricts pkg-config to the target
+RPATH handling and CMake build/install RPATH generation. The GPU model selects
+exactly one native display backend. `PF_GPU_MODEL=open` builds dynamic KMSDRM
+and no sunxifb; the default/closed `ddk` build keeps sunxifb and no KMSDRM.
+sunxifb is DDK-only: SDL bootstraps it before KMSDRM, and its window surface
+is an EGL surface on native window 0, which only the vendor DDK accepts. An
+open build that carried both selected sunxifb, and every window failed with
+`sunxifb: Can't create EGL window surface` (tsp-f3fm.218). On the open model
+SDL therefore defaults to KMSDRM; for a panel whose connector reports a
+non-Normal "panel orientation", KMSDRM presents rotated
+(`SDL_KMSDRM_PRESENT_ROTATION=0` opts out). Open configuration also restricts pkg-config to the target
 sysroot and requires target libdrm and GBM metadata before CMake runs. Reusing
 the same `/work/out` across GPU models is supported: the recipe fingerprints
 `PF_GPU_MODEL` and the selected EGL/GLES root and clears CMake's discovery
@@ -87,12 +94,20 @@ The shipped `libSDL3-pocketforge.so.0` must have neither `DT_RPATH` nor
 `DT_RUNPATH`: a host build path is not a valid runtime dependency, and a
 trailing empty loader-path component would search the current working
 directory. Artifact verification fails closed if either dynamic tag is
-present, if EGL/GLES dependencies are absent, or if the compiled backend set
-does not match the selected GPU model. For open artifacts, exact embedded
-`kmsdrm`, `sunxifb`, `libdrm.so.2`, and `libgbm.so.1` strings plus the absence
-of direct `DT_NEEDED` entries for libdrm/libgbm are compiled evidence that the
-dynamic KMSDRM backend was included; CMake flags alone are not accepted as
-artifact evidence.
+present, or if the compiled backend set does not match the selected GPU model.
+It reads the backend set from the built library, never from CMake flags: the
+exact embedded driver-name strings (`sunxifb`, `kmsdrm`) and the video
+bootstrap symbols in the unstripped symbol table (`SUNXIFB_bootstrap`,
+`KMSDRM_bootstrap`). Every model requires one bootstrap symbol to be present,
+so a stripped library fails rather than passing the absence checks.
+
+- `ddk`: direct `DT_NEEDED` libEGL.so.1 and libGLESv2.so.2 (sunxifb links
+  them), `sunxifb` and `SUNXIFB_bootstrap` present, no KMSDRM string or symbol.
+- `open`: no `sunxifb` string and no `SUNXIFB_bootstrap`; `kmsdrm`,
+  `KMSDRM_bootstrap`, `libdrm.so.2` and `libgbm.so.1` present, and no direct
+  `DT_NEEDED` on libdrm/libgbm (KMSDRM loads them dynamically). No direct
+  EGL/GLES link is required: only sunxifb links them, and KMSDRM loads EGL at
+  runtime through SDL_egl.
 
 The source-level contract for this policy can be checked without the cross
 toolchain or proprietary DDK input:
@@ -100,6 +115,14 @@ toolchain or proprietary DDK input:
 ```sh
 build/test-build-libsdl3-contract.sh
 ```
+
+CI (`.github/workflows/gpu-model-backends.yml`) runs that contract and then
+`tests/gpu-model-backends/run.sh` in this directory's pinned cross-build
+container. The run builds real open and ddk libraries with this recipe against
+a stub EGL/GLES root, and checks each one's build config, symbol table, strings
+and SDL's own video-driver list (run under qemu-aarch64). It also shows that
+the base commit's build logic fails. It runs only in containers on the
+ephemeral builder runners; do not run it on a workstation.
 
 ```sh
 docker run --rm \

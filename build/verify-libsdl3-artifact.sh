@@ -22,13 +22,6 @@ if printf '%s\n' "${dynamic}" | grep -E '\((RPATH|RUNPATH)\)' >/dev/null; then
   echo "FATAL: shipped SDL artifact contains RPATH or RUNPATH" >&2
   exit 1
 fi
-for needed in libEGL.so.1 libGLESv2.so.2; do
-  if ! printf '%s\n' "${dynamic}" | grep -F '(NEEDED)' | grep -F "[${needed}]" >/dev/null; then
-    echo "FATAL: SDL artifact is missing required dependency ${needed}" >&2
-    exit 1
-  fi
-done
-
 if ! symbols=$("${NM}" -D "${SO}"); then
   echo "FATAL: nm inspection failed for SDL artifact" >&2
   exit 1
@@ -47,6 +40,20 @@ printf '%s\n' "${artifact_strings}" \
   | grep -E '^(x11|wayland|kmsdrm|sunxifb|dummy|offscreen|vivante|rpi)$' \
   | sort -u || true
 
+# The build output is not stripped, so its full symbol table names each
+# compiled video bootstrap independently of the driver-name strings. Every
+# model requires one bootstrap symbol to be present, so a stripped or otherwise
+# symbol-less artifact fails closed instead of passing the absence checks.
+if ! symbol_table=$("${NM}" "${SO}"); then
+  echo "FATAL: nm symbol-table inspection failed for SDL artifact" >&2
+  exit 1
+fi
+symbol_names=$(printf '%s\n' "${symbol_table}" | awk 'NF { print $NF }')
+echo "SDL video bootstrap symbols:"
+printf '%s\n' "${symbol_names}" \
+  | grep -Ex '(SUNXIFB|KMSDRM)_bootstrap' \
+  | sort -u || true
+
 has_artifact_string() {
   # Read the complete stream rather than using grep -q: the latter exits at
   # the first match and can make dash's printf report a broken-pipe I/O error
@@ -54,14 +61,39 @@ has_artifact_string() {
   printf '%s\n' "${artifact_strings}" | grep -Fx "$1" >/dev/null
 }
 
+has_symbol() {
+  printf '%s\n' "${symbol_names}" | grep -Fx "$1" >/dev/null
+}
+
+has_needed() {
+  printf '%s\n' "${dynamic}" | grep -F '(NEEDED)' | grep -F "[$1]" >/dev/null
+}
+
 case "${PF_GPU_MODEL}" in
   open)
-    for required in sunxifb kmsdrm libdrm.so.2 libgbm.so.1; do
+    # tsp-f3fm.218: sunxifb bootstraps before KMSDRM and its EGL window
+    # surface works only on the vendor DDK, so an open artifact that contains
+    # it never reaches KMSDRM. The open model must compile no sunxifb at all.
+    if has_artifact_string sunxifb; then
+      echo "FATAL: open SDL artifact contains the sunxifb backend (it is DDK-only and would be selected before KMSDRM)" >&2
+      exit 1
+    fi
+    if has_symbol SUNXIFB_bootstrap; then
+      echo "FATAL: open SDL artifact contains the SUNXIFB_bootstrap symbol (sunxifb is DDK-only)" >&2
+      exit 1
+    fi
+    for required in kmsdrm libdrm.so.2 libgbm.so.1; do
       if ! has_artifact_string "${required}"; then
         echo "FATAL: open SDL artifact is missing compiled KMSDRM evidence: ${required}" >&2
         exit 1
       fi
     done
+    if ! has_symbol KMSDRM_bootstrap; then
+      echo "FATAL: open SDL artifact is missing the KMSDRM_bootstrap symbol (KMSDRM not compiled, or the symbol table was stripped)" >&2
+      exit 1
+    fi
+    # No direct libEGL/libGLESv2 dependency is required here: only sunxifb
+    # links them, and KMSDRM loads EGL/GLES at runtime through SDL_egl.
     for forbidden in libdrm.so libgbm.so; do
       if printf '%s\n' "${dynamic}" \
           | grep -F '(NEEDED)' \
@@ -72,11 +104,21 @@ case "${PF_GPU_MODEL}" in
     done
     ;;
   ddk)
+    for needed in libEGL.so.1 libGLESv2.so.2; do
+      if ! has_needed "${needed}"; then
+        echo "FATAL: SDL artifact is missing required dependency ${needed}" >&2
+        exit 1
+      fi
+    done
     if ! has_artifact_string sunxifb; then
       echo "FATAL: closed SDL artifact is missing the sunxifb backend" >&2
       exit 1
     fi
-    if has_artifact_string kmsdrm; then
+    if ! has_symbol SUNXIFB_bootstrap; then
+      echo "FATAL: closed SDL artifact is missing the SUNXIFB_bootstrap symbol (sunxifb not compiled, or the symbol table was stripped)" >&2
+      exit 1
+    fi
+    if has_artifact_string kmsdrm || has_symbol KMSDRM_bootstrap; then
       echo "FATAL: closed SDL artifact unexpectedly contains the KMSDRM backend" >&2
       exit 1
     fi

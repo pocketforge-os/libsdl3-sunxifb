@@ -1,0 +1,87 @@
+# gpu-model-backends - the GPU model selects the compiled SDL display backend
+# (tsp-f3fm.218): the open Mesa model builds KMSDRM and no sunxifb, the closed
+# DDK builds sunxifb and no KMSDRM. tests/gpu-model-backends/run.sh runs the
+# fixture contract (build/test-build-libsdl3-contract.sh), then the real
+# build/build-libsdl3.sh for both models in the pinned cross-build container,
+# asserts on the built libraries, and shows the base commit's build logic fails.
+#
+# Containers only, on the ephemeral pf-builder-vm runners (owner directive
+# 2026-09-28): the slot supplies Docker and nothing else; the test run has no
+# network, the source is mounted read-only, and no device is touched.
+name: gpu-model-backends
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+    paths:
+      - .github/workflows/gpu-model-backends.yml
+      - build/**
+      - tests/gpu-model-backends/**
+      - sdl3/CMakeLists.txt
+      - sdl3/cmake/**
+      - sdl3/include/build_config/SDL_build_config.h.cmake
+      - sdl3/src/video/SDL_video.c
+      - sdl3/src/video/SDL_sysvideo.h
+      - sdl3/src/video/SDL_egl.c
+      - sdl3/src/video/kmsdrm/**
+      - sdl3/src/video/sunxifb/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-model-backends-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gpu-model-backends:
+    # Fork guard: PR code from any other repository never reaches the builder.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, pf-builder-vm]
+    timeout-minutes: 90
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+    steps:
+      - name: Check out the tested commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/gpu-model-backends-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf -- "$root"
+          mkdir -p -- "$root"
+          echo "CI_ROOT=$root" >> "$GITHUB_ENV"
+          echo "CROSS_IMAGE=pf-cross-build:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+          echo "CI_IMAGE=gpu-model-backends:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+          git init --quiet "$root/src"
+          # The token is used for these fetches only; it is not stored in the clone.
+          for sha in "$HEAD_SHA" "$BASE_SHA"; do
+            git -C "$root/src" -c credential.helper= fetch --quiet --no-tags \
+              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$sha"
+          done
+          git -C "$root/src" checkout --quiet --detach "$HEAD_SHA"
+          test "$(git -C "$root/src" rev-parse HEAD)" = "$HEAD_SHA"
+          git -C "$root/src" cat-file -e "$BASE_SHA^{commit}"
+          echo "head=$HEAD_SHA base=$BASE_SHA runner=$RUNNER_NAME"
+
+      - name: Build the pinned cross-build container (build/Dockerfile)
+        run: docker build --pull -t "$CROSS_IMAGE" "$CI_ROOT/src/build"
+
+      - name: Build the test layer
+        run: |
+          docker build --build-arg CROSS_IMAGE="$CROSS_IMAGE" -t "$CI_IMAGE" \
+            -f "$CI_ROOT/src/tests/gpu-model-backends/Dockerfile" "$CI_ROOT/src/tests/gpu-model-backends"
+
+      - name: Run the tests (no network, read-only source)
+        run: |
+          docker run --rm --network none -e BASE_SHA \
+            -v "$CI_ROOT/src:/src:ro" "$CI_IMAGE" bash /src/tests/gpu-model-backends/run.sh
+
+      - name: Producer-side cleanup
+        if: always()
+        run: |
+          for image in "${CI_IMAGE:-}" "${CROSS_IMAGE:-}"; do
+            if [ -n "$image" ]; then docker image rm -f "$image" >/dev/null 2>&1 || true; fi
+          done
+          if [ -n "${CI_ROOT:-}" ]; then rm -rf -- "$CI_ROOT"; fi
