@@ -44,6 +44,10 @@
 #include "../../core/linux/SDL_evdev_capabilities.h"
 #include "../../core/linux/SDL_udev.h"
 
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+#include "../../video/kmsdrm/SDL_kmsdrmprerotate.h"
+#endif
+
 // These are not defined in older Linux kernel headers
 #ifndef SYN_DROPPED
 #define SYN_DROPPED 3
@@ -130,6 +134,22 @@ typedef struct SDL_EVDEV_PrivateData
 } SDL_EVDEV_PrivateData;
 
 static SDL_EVDEV_PrivateData *_this = NULL;
+
+static int SDL_EVDEV_GetRendererPreRotation(SDL_Window *window)
+{
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+    if (window) {
+        const SDL_PropertiesID props = SDL_GetWindowProperties(window);
+        const int rotation = SDL_GetBooleanProperty(props, KMSDRM_PREROTATION_ACTIVE_PROPERTY, false)
+                                 ? (int)SDL_GetNumberProperty(props, KMSDRM_PRESENT_ROTATION_WINDOW_PROPERTY, 0)
+                                 : 0;
+        return KMSDRM_RotationIsValid(rotation) ? rotation : 0;
+    }
+#else
+    (void)window;
+#endif
+    return 0;
+}
 
 static SDL_Scancode SDL_EVDEV_translate_keycode(int keycode);
 static void SDL_EVDEV_sync_device(SDL_evdevlist_item *item);
@@ -492,7 +512,13 @@ void SDL_EVDEV_Poll(void)
                         if (item->relative_mouse) {
                             if (item->mouse_x != 0 || item->mouse_y != 0) {
                                 Uint64 timestamp = SDL_EVDEV_GetEventTimestamp(event);
-                                SDL_SendMouseMotion(timestamp, mouse->focus, (SDL_MouseID)item->fd, item->relative_mouse, (float)item->mouse_x, (float)item->mouse_y);
+                                float x = (float)item->mouse_x;
+                                float y = (float)item->mouse_y;
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+                                KMSDRM_PreRotationPhysicalDeltaToLogical(SDL_EVDEV_GetRendererPreRotation(mouse->focus),
+                                                                         x, y, &x, &y);
+#endif
+                                SDL_SendMouseMotion(timestamp, mouse->focus, (SDL_MouseID)item->fd, item->relative_mouse, x, y);
                                 item->mouse_x = item->mouse_y = 0;
                             }
                         } else if (item->range_x > 0 && item->range_y > 0) {
@@ -509,9 +535,16 @@ void SDL_EVDEV_Poll(void)
                                 screen_w = mode->w;
                                 screen_h = mode->h;
                             }
-                            SDL_SendMouseMotion(SDL_EVDEV_GetEventTimestamp(event), mouse->focus, (SDL_MouseID)item->fd, item->relative_mouse,
-                                (float)(item->mouse_x - item->min_x) * screen_w / item->range_x,
-                                (float)(item->mouse_y - item->min_y) * screen_h / item->range_y);
+                            {
+                                float norm_x = (float)(item->mouse_x - item->min_x) / item->range_x;
+                                float norm_y = (float)(item->mouse_y - item->min_y) / item->range_y;
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+                                KMSDRM_PreRotationPhysicalToLogicalNormalized(SDL_EVDEV_GetRendererPreRotation(mouse->focus),
+                                                                               norm_x, norm_y, &norm_x, &norm_y);
+#endif
+                                SDL_SendMouseMotion(SDL_EVDEV_GetEventTimestamp(event), mouse->focus, (SDL_MouseID)item->fd, item->relative_mouse,
+                                                    norm_x * screen_w, norm_y * screen_h);
+                            }
                         }
 
                         if (item->mouse_wheel != 0 || item->mouse_hwheel != 0) {
@@ -534,6 +567,10 @@ void SDL_EVDEV_Poll(void)
                                      (float)item->touchscreen_data->range_x;
                             norm_y = (float)(item->touchscreen_data->slots[j].y - item->touchscreen_data->min_y) /
                                      (float)item->touchscreen_data->range_y;
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+                            KMSDRM_PreRotationPhysicalToLogicalNormalized(SDL_EVDEV_GetRendererPreRotation(mouse->focus),
+                                                                           norm_x, norm_y, &norm_x, &norm_y);
+#endif
 
                             if (item->touchscreen_data->range_pressure > 0) {
                                 norm_pressure = (float)(item->touchscreen_data->slots[j].pressure - item->touchscreen_data->min_pressure) /

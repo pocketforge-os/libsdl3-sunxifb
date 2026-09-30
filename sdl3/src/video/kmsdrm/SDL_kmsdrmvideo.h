@@ -207,6 +207,10 @@ struct SDL_WindowData
        egl_surface are the application's logical-size surface and the present
        pair is the panel-native one that SDL_kmsdrmrotate.c renders into. */
     int rotation;
+    /* Default-off SDL_Renderer direct-to-physical-surface negotiation. The
+       renderer must set the active window property before first swap. */
+    bool renderer_prerotation_requested;
+    bool renderer_prerotation_disabled;
     struct gbm_surface *present_gs;
     EGLSurface present_egl_surface;
     struct KMSDRM_Rotate *rotate;

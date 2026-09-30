@@ -25,6 +25,7 @@
 
 #include "SDL_kmsdrmvideo.h"
 #include "SDL_kmsdrmopengles.h"
+#include "SDL_kmsdrmprerotate.h"
 #include "SDL_kmsdrmdyn.h"
 #include "SDL_kmsdrmrotate.h"
 #include "SDL_kmsdrmtiming.h"
@@ -572,6 +573,18 @@ bool KMSDRM_GLES_SwapWindow(SDL_VideoDevice *_this, SDL_Window * window)
     Uint64 stage_start;
     bool result;
 
+    /* A pre-rotation candidate becomes direct scanout only after the GLES2
+       SDL_Renderer acknowledges it. Raw GL and unsupported renderers fail
+       closed to the established two-surface rotate path. */
+    if (windata->renderer_prerotation_requested && !windata->renderer_prerotation_disabled &&
+        !SDL_GetBooleanProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_ACTIVE_PROPERTY, false)) {
+        windata->renderer_prerotation_disabled = true;
+        SDL_ClearProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_WINDOW_PROPERTY);
+        SDL_ClearProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_ACTIVE_PROPERTY);
+        SDL_Log("KMSDRM SDL_Renderer pre-rotation fallback: no supported renderer handshake");
+        return KMSDRM_CreateSurfaces(_this, window);
+    }
+
     if (windata->swap_window == NULL) {
         SDL_VideoData *viddata = _this->internal;
         // PocketForge: SDL_KMSDRM_PRESENT_TIMING, read once per window.
@@ -589,7 +602,7 @@ bool KMSDRM_GLES_SwapWindow(SDL_VideoDevice *_this, SDL_Window * window)
             windata->swap_window = KMSDRM_GLES_SwapWindowLegacy;
         }
     }
-    if (windata->rotation != 0) {
+    if (windata->rotate) {
         return KMSDRM_GLES_SwapWindowRotated(_this, window);
     }
     stage_start = KMSDRM_Timing_SwapStart(dispdata->timing);

@@ -1215,6 +1215,7 @@ typedef struct FakeTexture
 {
     GLuint name;
     FakeImage *image;
+    int storage;
 } FakeTexture;
 
 typedef struct FakeFramebuffer
@@ -1235,7 +1236,9 @@ typedef struct FakeContext
     int num_framebuffers;
     GLuint bound_framebuffer; // 0: the current draw surface
     GLint viewport[4];
-    const void *attrib[2];
+    GLint scissor[4];
+    GLfloat projection[16];
+    const void *attrib[3];
     GLuint program;
 } FakeContext;
 
@@ -1747,8 +1750,15 @@ FAKE_EXPORT void glCompileShader(GLuint shader) { (void)shader; gl_ctx("glCompil
 FAKE_EXPORT void glDeleteProgram(GLuint program) { (void)program; gl_ctx("glDeleteProgram"); }
 FAKE_EXPORT void glDeleteShader(GLuint shader) { (void)shader; gl_ctx("glDeleteShader"); }
 FAKE_EXPORT void glDisable(GLenum cap) { (void)cap; gl_ctx("glDisable"); }
+FAKE_EXPORT void glDisableVertexAttribArray(GLuint index) { (void)index; gl_ctx("glDisableVertexAttribArray"); }
 FAKE_EXPORT void glEnable(GLenum cap) { (void)cap; gl_ctx("glEnable"); }
 FAKE_EXPORT void glEnableVertexAttribArray(GLuint index) { (void)index; gl_ctx("glEnableVertexAttribArray"); }
+FAKE_EXPORT void glBlendEquationSeparate(GLenum rgb, GLenum alpha) { (void)rgb; (void)alpha; gl_ctx("glBlendEquationSeparate"); }
+FAKE_EXPORT void glBlendFuncSeparate(GLenum src_rgb, GLenum dst_rgb, GLenum src_alpha, GLenum dst_alpha)
+{
+    (void)src_rgb; (void)dst_rgb; (void)src_alpha; (void)dst_alpha;
+    gl_ctx("glBlendFuncSeparate");
+}
 FAKE_EXPORT void glFinish(void) { gl_ctx("glFinish"); }
 FAKE_EXPORT void glFlush(void) { gl_ctx("glFlush"); }
 #ifndef FAKE_KMS_OMIT_GL_LINK_PROGRAM
@@ -1756,10 +1766,29 @@ FAKE_EXPORT void glLinkProgram(GLuint program) { (void)program; gl_ctx("glLinkPr
 #endif
 FAKE_EXPORT void glPixelStorei(GLenum pname, GLint param) { (void)pname; (void)param; gl_ctx("glPixelStorei"); }
 FAKE_EXPORT void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *string, const GLint *length) { (void)shader; (void)count; (void)string; (void)length; gl_ctx("glShaderSource"); }
+FAKE_EXPORT void glShaderBinary(GLsizei count, const GLuint *shaders, GLenum binaryformat, const void *binary, GLsizei length)
+{
+    (void)count; (void)shaders; (void)binaryformat; (void)binary; (void)length;
+    gl_ctx("glShaderBinary");
+}
 FAKE_EXPORT void glTexParameteri(GLenum target, GLenum pname, GLint param) { (void)target; (void)pname; (void)param; gl_ctx("glTexParameteri"); }
 FAKE_EXPORT void glUniform1i(GLint location, GLint v0) { (void)location; (void)v0; gl_ctx("glUniform1i"); }
+FAKE_EXPORT void glUniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2) { (void)location; (void)v0; (void)v1; (void)v2; gl_ctx("glUniform3f"); }
+FAKE_EXPORT void glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) { (void)location; (void)v0; (void)v1; (void)v2; (void)v3; gl_ctx("glUniform4f"); }
+FAKE_EXPORT void glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) { (void)location; (void)count; (void)transpose; (void)value; gl_ctx("glUniformMatrix3fv"); }
+FAKE_EXPORT void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
+{
+    FakeContext *ctx = gl_ctx("glUniformMatrix4fv");
+    (void)location;
+    if (ctx && count == 1 && !transpose && value) {
+        memcpy(ctx->projection, value, sizeof(ctx->projection));
+    }
+}
 FAKE_EXPORT GLenum glGetError(void) { gl_ctx("glGetError"); return GL_NO_ERROR; }
 FAKE_EXPORT GLint glGetUniformLocation(GLuint program, const GLchar *name) { (void)program; (void)name; gl_ctx("glGetUniformLocation"); return 0; }
+FAKE_EXPORT GLint glGetAttribLocation(GLuint program, const GLchar *name) { (void)program; (void)name; gl_ctx("glGetAttribLocation"); return 0; }
+FAKE_EXPORT void glGetProgramInfoLog(GLuint program, GLsizei max, GLsizei *length, GLchar *log) { (void)program; (void)max; gl_ctx("glGetProgramInfoLog"); if (length) *length = 0; if (log && max) *log = '\0'; }
+FAKE_EXPORT void glGetShaderInfoLog(GLuint shader, GLsizei max, GLsizei *length, GLchar *log) { (void)shader; (void)max; gl_ctx("glGetShaderInfoLog"); if (length) *length = 0; if (log && max) *log = '\0'; }
 
 FAKE_EXPORT GLuint glCreateShader(GLenum type)
 {
@@ -1826,6 +1855,7 @@ FAKE_EXPORT void glGenTextures(GLsizei n, GLuint *textures)
         if (ctx && ctx->num_textures < (int)(sizeof(ctx->textures) / sizeof(ctx->textures[0]))) {
             ctx->textures[ctx->num_textures].name = ctx->next_name++;
             ctx->textures[ctx->num_textures].image = NULL;
+            ctx->textures[ctx->num_textures].storage = 0;
             textures[i] = ctx->textures[ctx->num_textures].name;
             ctx->num_textures++;
         }
@@ -1841,6 +1871,7 @@ FAKE_EXPORT void glDeleteTextures(GLsizei n, const GLuint *textures)
         if (tex) {
             tex->name = 0;
             tex->image = NULL;
+            tex->storage = 0;
         }
     }
 }
@@ -1869,6 +1900,7 @@ FAKE_EXPORT void glEGLImageTargetTexture2DOES(GLenum target, GLeglImageOES image
         return;
     }
     tex->image = img;
+    tex->storage = 1;
 }
 
 FAKE_EXPORT void glViewport(GLint x, GLint y, GLsizei width, GLsizei height)
@@ -1882,6 +1914,17 @@ FAKE_EXPORT void glViewport(GLint x, GLint y, GLsizei width, GLsizei height)
     }
 }
 
+FAKE_EXPORT void glScissor(GLint x, GLint y, GLsizei width, GLsizei height)
+{
+    FakeContext *ctx = gl_ctx("glScissor");
+    if (ctx) {
+        ctx->scissor[0] = x;
+        ctx->scissor[1] = y;
+        ctx->scissor[2] = width;
+        ctx->scissor[3] = height;
+    }
+}
+
 FAKE_EXPORT void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized,
                                        GLsizei stride, const void *pointer)
 {
@@ -1890,12 +1933,26 @@ FAKE_EXPORT void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GL
     if (!ctx) {
         return;
     }
-    if (index > 1 || size != 2 || type != GL_FLOAT || stride != 0) {
-        fake_error("glVertexAttribPointer(%u, %d, 0x%x, stride %d): the fake models packed vec2 attributes 0 and 1",
+    if (index > 2 || (size != 2 && size != 4) || type != GL_FLOAT || stride < 0) {
+        fake_error("glVertexAttribPointer(%u, %d, 0x%x, stride %d): unsupported attribute",
                    index, size, type, stride);
         return;
     }
     ctx->attrib[index] = pointer;
+}
+
+FAKE_EXPORT void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
+                              GLenum format, GLenum type, void *pixels)
+{
+    gl_ctx("glReadPixels");
+    g_report.readpixels_calls++;
+    g_report.readpixels_rect[0] = x;
+    g_report.readpixels_rect[1] = y;
+    g_report.readpixels_rect[2] = width;
+    g_report.readpixels_rect[3] = height;
+    if (pixels && width > 0 && height > 0 && format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
+        memset(pixels, 0, (size_t)width * (size_t)height * 4);
+    }
 }
 
 static FakeFramebuffer *find_framebuffer(FakeContext *ctx, GLuint name)
@@ -1979,7 +2036,7 @@ FAKE_EXPORT GLenum glCheckFramebufferStatus(GLenum target)
     }
     fb = find_framebuffer(ctx, ctx->bound_framebuffer);
     tex = fb ? find_texture(ctx, fb->texture) : NULL;
-    return (tex && tex->image) ? GL_FRAMEBUFFER_COMPLETE : GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+    return (tex && tex->storage) ? GL_FRAMEBUFFER_COMPLETE : GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
 }
 
 FAKE_EXPORT void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height,
@@ -1999,7 +2056,29 @@ FAKE_EXPORT void glTexImage2D(GLenum target, GLint level, GLint internalformat, 
         return;
     }
     tex->image = NULL; // plain storage, not an EGLImage
+    tex->storage = 1;
 }
+
+FAKE_EXPORT void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                                 GLsizei width, GLsizei height, GLenum format, GLenum type, const void *pixels)
+{
+    (void)target; (void)level; (void)xoffset; (void)yoffset; (void)width; (void)height;
+    (void)format; (void)type; (void)pixels;
+    gl_ctx("glTexSubImage2D");
+}
+
+FAKE_EXPORT void glGenBuffers(GLsizei n, GLuint *buffers)
+{
+    FakeContext *ctx = gl_ctx("glGenBuffers");
+    GLsizei i;
+    for (i = 0; i < n; ++i) {
+        buffers[i] = ctx ? ctx->next_name++ : 0;
+    }
+}
+FAKE_EXPORT void glDeleteBuffers(GLsizei n, const GLuint *buffers) { (void)n; (void)buffers; gl_ctx("glDeleteBuffers"); }
+FAKE_EXPORT void glBindBuffer(GLenum target, GLuint buffer) { (void)target; (void)buffer; gl_ctx("glBindBuffer"); }
+FAKE_EXPORT void glBufferData(GLenum target, GLsizeiptr size, const void *data, GLenum usage) { (void)target; (void)size; (void)data; (void)usage; gl_ctx("glBufferData"); }
+FAKE_EXPORT void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void *data) { (void)target; (void)offset; (void)size; (void)data; gl_ctx("glBufferSubData"); }
 
 /* The read framebuffer's image becomes what the bound texture samples: a model
    of copying the application's frame into a texture the rotate context owns. */
@@ -2034,13 +2113,27 @@ FAKE_EXPORT void glDrawArrays(GLenum mode, GLint first, GLsizei count)
         return;
     }
     if (ctx->bound_framebuffer) {
-        fake_error("glDrawArrays with framebuffer object %u bound: the rotate pass must draw into the present surface",
-                   ctx->bound_framebuffer);
+        g_report.renderer_texture_target_draws++;
+        memcpy(g_report.renderer_texture_target_viewport, ctx->viewport,
+               sizeof(g_report.renderer_texture_target_viewport));
+        memcpy(g_report.renderer_texture_target_projection, ctx->projection,
+               sizeof(g_report.renderer_texture_target_projection));
         return;
     }
     tex = find_texture(ctx, ctx->bound_texture);
+    if (!tex || !tex->image) {
+        (void)mode;
+        (void)first;
+        (void)count;
+        g_report.renderer_draws++;
+        g_report.renderer_target_surface = (g_draw && g_draw->gs) ? g_draw->gs->index : -1;
+        memcpy(g_report.renderer_viewport, ctx->viewport, sizeof(g_report.renderer_viewport));
+        memcpy(g_report.renderer_scissor, ctx->scissor, sizeof(g_report.renderer_scissor));
+        memcpy(g_report.renderer_projection, ctx->projection, sizeof(g_report.renderer_projection));
+        return;
+    }
     if (mode != GL_TRIANGLE_STRIP || first != 0 || count != 4 || !ctx->attrib[0] || !ctx->attrib[1] ||
-        !tex || !tex->image) {
+        !tex->image) {
         fake_error("glDrawArrays: the fake models the rotate pass (a 4-vertex strip sampling an EGLImage)");
         return;
     }
@@ -2124,20 +2217,25 @@ static const struct
     FAKE_PROC(eglDestroySyncKHR), FAKE_PROC(eglClientWaitSyncKHR), FAKE_PROC(eglWaitSyncKHR),
     FAKE_PROC(eglDupNativeFenceFDANDROID), FAKE_PROC(eglCreateImageKHR), FAKE_PROC(eglDestroyImageKHR),
     FAKE_PROC(glActiveTexture), FAKE_PROC(glAttachShader), FAKE_PROC(glBindAttribLocation), FAKE_PROC(glBindTexture),
+    FAKE_PROC(glBlendEquationSeparate), FAKE_PROC(glBlendFuncSeparate),
     FAKE_PROC(glClear), FAKE_PROC(glClearColor), FAKE_PROC(glCompileShader), FAKE_PROC(glCreateProgram),
     FAKE_PROC(glCreateShader), FAKE_PROC(glDeleteProgram), FAKE_PROC(glDeleteShader), FAKE_PROC(glDeleteTextures),
-    FAKE_PROC(glDisable), FAKE_PROC(glEnable), FAKE_PROC(glDrawArrays), FAKE_PROC(glEnableVertexAttribArray),
+    FAKE_PROC(glDisable), FAKE_PROC(glDisableVertexAttribArray), FAKE_PROC(glEnable), FAKE_PROC(glDrawArrays), FAKE_PROC(glEnableVertexAttribArray),
     FAKE_PROC(glFinish), FAKE_PROC(glFlush), FAKE_PROC(glGenTextures), FAKE_PROC(glGetError), FAKE_PROC(glGetIntegerv),
-    FAKE_PROC(glGetProgramiv), FAKE_PROC(glGetShaderiv), FAKE_PROC(glGetString), FAKE_PROC(glGetUniformLocation),
+    FAKE_PROC(glGetAttribLocation), FAKE_PROC(glGetProgramInfoLog), FAKE_PROC(glGetProgramiv),
+    FAKE_PROC(glGetShaderInfoLog), FAKE_PROC(glGetShaderiv), FAKE_PROC(glGetString), FAKE_PROC(glGetUniformLocation),
 #ifndef FAKE_KMS_OMIT_GL_LINK_PROGRAM
     FAKE_PROC(glLinkProgram),
 #endif
-    FAKE_PROC(glPixelStorei), FAKE_PROC(glShaderSource), FAKE_PROC(glTexParameteri),
-    FAKE_PROC(glUniform1i), FAKE_PROC(glUseProgram), FAKE_PROC(glVertexAttribPointer), FAKE_PROC(glViewport),
+    FAKE_PROC(glPixelStorei), FAKE_PROC(glReadPixels), FAKE_PROC(glScissor), FAKE_PROC(glShaderBinary),
+    FAKE_PROC(glShaderSource), FAKE_PROC(glTexParameteri), FAKE_PROC(glTexSubImage2D),
+    FAKE_PROC(glUniform1i), FAKE_PROC(glUniform3f), FAKE_PROC(glUniform4f), FAKE_PROC(glUniformMatrix3fv),
+    FAKE_PROC(glUniformMatrix4fv), FAKE_PROC(glUseProgram), FAKE_PROC(glVertexAttribPointer), FAKE_PROC(glViewport),
     FAKE_PROC(glEGLImageTargetTexture2DOES),
     FAKE_PROC(glBindFramebuffer), FAKE_PROC(glCheckFramebufferStatus), FAKE_PROC(glCopyTexSubImage2D),
     FAKE_PROC(glDeleteFramebuffers), FAKE_PROC(glFramebufferTexture2D), FAKE_PROC(glGenFramebuffers),
-    FAKE_PROC(glTexImage2D),
+    FAKE_PROC(glTexImage2D), FAKE_PROC(glGenBuffers), FAKE_PROC(glDeleteBuffers), FAKE_PROC(glBindBuffer),
+    FAKE_PROC(glBufferData), FAKE_PROC(glBufferSubData),
 };
 
 // Entry points only an SDL_KMSDRM_ROTATE_EXPERIMENT resolves (glClear is also the application's).

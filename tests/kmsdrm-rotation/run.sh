@@ -64,6 +64,10 @@ step "1. unit: orientation map"
 cc "${STRICT[@]}" -I"$KMSDRM" -o "$WORK/test-orientation" "$T/test-orientation.c"
 "$WORK/test-orientation"
 
+step "1. unit: SDL_Renderer pre-rotation transforms"
+cc "${STRICT[@]}" -I"$KMSDRM" -o "$WORK/test-prerotate" "$T/test-prerotate.c"
+"$WORK/test-prerotate"
+
 step "1. unit: atomic commit result classification"
 cc "${STRICT[@]}" -I"$KMSDRM" -o "$WORK/test-commit-classify" "$T/test-commit-classify.c"
 "$WORK/test-commit-classify"
@@ -131,6 +135,10 @@ build_fake "$WORK/fake-nolink" -DFAKE_KMS_OMIT_GL_LINK_PROGRAM
 cc -std=c99 -O1 -g -Wall -Wextra "${NOX11[@]}" $(pkg-config --cflags gbm) \
     -I"$WORK/prefix-head/include" -I"$T" -o "$WORK/test-kmsdrm-rotation" "$T/test-kmsdrm-rotation.c" \
     -L"$WORK/prefix-head/lib" -lSDL3-pocketforge -ldl
+cc -std=c99 -O1 -g -Wall -Wextra "${NOX11[@]}" \
+    -I"$WORK/prefix-head/include" -I"$T" -I"$KMSDRM" \
+    -o "$WORK/test-kmsdrm-prerotate" "$T/test-kmsdrm-prerotate.c" \
+    -L"$WORK/prefix-head/lib" -lSDL3-pocketforge -ldl
 
 mkdir -p /dev/dri
 : >/dev/dri/card0
@@ -155,6 +163,7 @@ run_case() {
         SDL_KMSDRM_PRESENT_TIMING="${SDL_KMSDRM_PRESENT_TIMING:-}" \
         SDL_KMSDRM_ROTATE_EXPERIMENT="${SDL_KMSDRM_ROTATE_EXPERIMENT:-}" \
         SDL_KMSDRM_ROTATE_SOURCE_FORMAT="${SDL_KMSDRM_ROTATE_SOURCE_FORMAT:-}" \
+        SDL_KMSDRM_RENDERER_PREROTATION="${SDL_KMSDRM_RENDERER_PREROTATION:-}" \
         EXPECT_EXPERIMENT="${EXPECT_EXPERIMENT:-}" \
         FAKE_GBM_RGB565="${FAKE_GBM_RGB565:-1}" \
         FAKE_EGL_RGB565="${FAKE_EGL_RGB565:-1}" \
@@ -406,6 +415,32 @@ for name in lsu-fenced rsu-fenced flip-rsu-fenced-t2; do
         failed+=("$name-experiment-off")
     fi
 done
+
+# The Stage A handshake has 90/270-degree positives and two controls in this
+# invocation: the same SDL_Renderer without the hint, and raw GLES with it.
+while read -r name orientation rotation enabled; do
+    log="$WORK/case-$name.log"
+    rc=0
+    env LD_LIBRARY_PATH="$WORK/fake:$WORK/prefix-head/lib" \
+        FAKE_KMS_PANEL_ORIENTATION="${orientation//_/ }" FAKE_KMS_ATOMIC=1 \
+        FAKE_EGL_NATIVE_FENCE=1 FAKE_EGL_FENCE_SYNC=1 \
+        EXPECT_ROTATION=$rotation EXPECT_PREROTATE=$enabled \
+        "$WORK/test-kmsdrm-prerotate" >"$log" 2>&1 || rc=$?
+    printf '%-28s rc=%d  %s\n' "$name" "$rc" "$(grep -E '^RESULT:' "$log" || echo 'RESULT: none')"
+    if [ "$rc" -ne 0 ]; then
+        failed+=("$name")
+        sed 's/^/    /' "$log"
+    fi
+done <<'EOF'
+prerotate-renderer-off Left_Side_Up 90 0
+prerotate-renderer-lsu Left_Side_Up 90 1
+prerotate-renderer-rsu Right_Side_Up 270 1
+EOF
+if ! SDL_KMSDRM_RENDERER_PREROTATION=1 \
+    run_case prerotate-raw-fallback head "Left Side Up" 1 1 1 "" 90 90; then
+    failed+=(prerotate-raw-fallback)
+    sed 's/^/    /' "$WORK/case-prerotate-raw-fallback.log"
+fi
 
 if [ "${#failed[@]}" -ne 0 ]; then
     echo "FAIL: backend scenarios: ${failed[*]}" >&2

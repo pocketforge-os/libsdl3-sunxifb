@@ -64,6 +64,20 @@ typedef struct FakeKmsReport
     int draws;
     FakeKmsDraw last_draw;
 
+    /* SDL_Renderer GLES2 draws are distinct from the imported-image rotate
+       pass above. These fields make the pre-rotation viewport/projection and
+       clip/scissor contract observable without modelling rasterization. */
+    int renderer_draws;
+    int renderer_target_surface;
+    int renderer_viewport[4];
+    int renderer_scissor[4];
+    float renderer_projection[16];
+    int renderer_texture_target_draws;
+    int renderer_texture_target_viewport[4];
+    float renderer_texture_target_projection[16];
+    int readpixels_calls;
+    int readpixels_rect[4];
+
     /* tsp-mc9m.41.924.16.13.3, SDL_KMSDRM_ROTATE_EXPERIMENT: glCopyTexSubImage2D
        calls (the copy texture then samples as the read framebuffer's image), and
        eglGetProcAddress lookups of the entry points only an experiment uses
