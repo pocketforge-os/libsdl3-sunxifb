@@ -1833,6 +1833,7 @@ static void KMSDRM_GetModeToSet(SDL_Window *window, drmModeModeInfo *out_mode)
 static void KMSDRM_DirtySurfaces(SDL_Window *window)
 {
     SDL_WindowData *windata = window->internal;
+    SDL_PropertiesID props = SDL_GetWindowProperties(window);
     drmModeModeInfo mode;
 
     /* Can't recreate EGL surfaces right now, need to wait until SwapWindow
@@ -1846,6 +1847,10 @@ static void KMSDRM_DirtySurfaces(SDL_Window *window)
     {
         int w, h;
         KMSDRM_RotationLogicalSize(windata->rotation, mode.hdisplay, mode.vdisplay, &w, &h);
+        if (windata->renderer_prerotation_requested && !windata->renderer_prerotation_disabled) {
+            SDL_SetNumberProperty(props, KMSDRM_PREROTATION_LOGICAL_WIDTH_PROPERTY, w);
+            SDL_SetNumberProperty(props, KMSDRM_PREROTATION_LOGICAL_HEIGHT_PROPERTY, h);
+        }
         SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESIZED, w, h);
     }
 }
@@ -1866,6 +1871,8 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
     const bool renderer_prerotation = windata->rotation != 0 &&
                                       windata->renderer_prerotation_requested &&
                                       !windata->renderer_prerotation_disabled;
+    SDL_PropertiesID window_props = SDL_GetWindowProperties(window);
+    int prerotation_logical_w = 0, prerotation_logical_h = 0;
     int surface_w, surface_h;
     int requested_red = 0, requested_green = 0, requested_blue = 0;
     int requested_alpha = 0, requested_buffer = 0;
@@ -1874,6 +1881,19 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
     EGLint egl_visual_id = 0;
 
     bool result = true;
+
+    /* Save the SDL-facing dimensions before the panel-native surface resize
+       below changes window->w/h synchronously. A prior dirty-surface event
+       may already have supplied the next logical dimensions. */
+    if (renderer_prerotation) {
+        prerotation_logical_w = (int)SDL_GetNumberProperty(
+            window_props, KMSDRM_PREROTATION_LOGICAL_WIDTH_PROPERTY, 0);
+        prerotation_logical_h = (int)SDL_GetNumberProperty(
+            window_props, KMSDRM_PREROTATION_LOGICAL_HEIGHT_PROPERTY, 0);
+        if (prerotation_logical_w <= 0 || prerotation_logical_h <= 0) {
+            SDL_GetWindowSize(window, &prerotation_logical_w, &prerotation_logical_h);
+        }
+    }
 
     // If the current window already has surfaces, destroy them before creating other.
     if (windata->gs) {
@@ -2006,8 +2026,11 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
         windata->present_gs = windata->gs;
         windata->present_egl_surface = windata->egl_surface;
         if (renderer_prerotation) {
-            SDL_SetNumberProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_WINDOW_PROPERTY,
-                                  windata->rotation);
+            SDL_SetNumberProperty(window_props, KMSDRM_PREROTATION_WINDOW_PROPERTY, windata->rotation);
+            SDL_SetNumberProperty(window_props, KMSDRM_PREROTATION_LOGICAL_WIDTH_PROPERTY,
+                                  prerotation_logical_w);
+            SDL_SetNumberProperty(window_props, KMSDRM_PREROTATION_LOGICAL_HEIGHT_PROPERTY,
+                                  prerotation_logical_h);
             SDL_Log("KMSDRM SDL_Renderer pre-rotation candidate: rotation=%d surface=%dx%d",
                     windata->rotation, surface_w, surface_h);
         }

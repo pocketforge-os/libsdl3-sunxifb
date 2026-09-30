@@ -2598,11 +2598,18 @@ static bool GLES2_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL
 #ifdef SDL_VIDEO_DRIVER_KMSDRM
     data->kmsdrm_prerotation = (int)SDL_GetNumberProperty(SDL_GetWindowProperties(window),
                                                           KMSDRM_PREROTATION_WINDOW_PROPERTY, 0);
+    data->logical_drawablew = (int)SDL_GetNumberProperty(SDL_GetWindowProperties(window),
+                                                         KMSDRM_PREROTATION_LOGICAL_WIDTH_PROPERTY, 0);
+    data->logical_drawableh = (int)SDL_GetNumberProperty(SDL_GetWindowProperties(window),
+                                                         KMSDRM_PREROTATION_LOGICAL_HEIGHT_PROPERTY, 0);
     if (data->kmsdrm_prerotation && KMSDRM_RotationIsValid(data->kmsdrm_prerotation)) {
-        SDL_GetWindowSize(window, &data->logical_drawablew, &data->logical_drawableh);
-        SDL_SetBooleanProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_ACTIVE_PROPERTY, true);
-        SDL_Log("KMSDRM SDL_Renderer pre-rotation active: renderer=opengles2 rotation=%d",
-                data->kmsdrm_prerotation);
+        if (data->logical_drawablew > 0 && data->logical_drawableh > 0) {
+            SDL_SetBooleanProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_ACTIVE_PROPERTY, true);
+            SDL_Log("KMSDRM SDL_Renderer pre-rotation active: renderer=opengles2 rotation=%d logical=%dx%d",
+                    data->kmsdrm_prerotation, data->logical_drawablew, data->logical_drawableh);
+        } else {
+            data->kmsdrm_prerotation = 0;
+        }
     } else {
         data->kmsdrm_prerotation = 0;
     }

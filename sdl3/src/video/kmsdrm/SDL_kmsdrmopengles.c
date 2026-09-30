@@ -581,6 +581,8 @@ bool KMSDRM_GLES_SwapWindow(SDL_VideoDevice *_this, SDL_Window * window)
         windata->renderer_prerotation_disabled = true;
         SDL_ClearProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_WINDOW_PROPERTY);
         SDL_ClearProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_ACTIVE_PROPERTY);
+        SDL_ClearProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_LOGICAL_WIDTH_PROPERTY);
+        SDL_ClearProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_LOGICAL_HEIGHT_PROPERTY);
         SDL_Log("KMSDRM SDL_Renderer pre-rotation fallback: no supported renderer handshake");
         return KMSDRM_CreateSurfaces(_this, window);
     }

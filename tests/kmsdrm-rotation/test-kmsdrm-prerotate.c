@@ -51,7 +51,7 @@ int main(void)
     SDL_FRect fill = { 9.0f, 13.0f, 20.0f, 15.0f };
     SDL_Rect read_rect = { 110, 60, 40, 30 };
     int i, alive = 0, w = 0, h = 0;
-    long long candidate, active;
+    long long candidate, logical_w, logical_h, active;
 
     fake = dlopen("libdrm.so.2", RTLD_NOW | RTLD_LOCAL);
     get_report = fake ? (FakeKmsGetReportFn)dlsym(fake, "fake_kms_get_report") : NULL;
@@ -69,8 +69,7 @@ int main(void)
         return 1;
     }
 
-    window = SDL_CreateWindow("kmsdrm-renderer-prerotate", 1280, 720,
-                              SDL_WINDOW_FULLSCREEN);
+    window = SDL_CreateWindow("kmsdrm-renderer-prerotate", 1280, 720, 0);
     if (!window) {
         printf("FAIL: SDL_CreateWindow: %s\n", SDL_GetError());
         return 1;
@@ -80,6 +79,15 @@ int main(void)
         "SDL.window.KMSDRM.pocketforge.renderer_prerotation", 0);
     CHECK(candidate == (enabled ? rotation : 0), "candidate rotation is %lld (expected %d)",
           candidate, enabled ? rotation : 0);
+    logical_w = (long long)SDL_GetNumberProperty(
+        SDL_GetWindowProperties(window),
+        KMSDRM_PREROTATION_LOGICAL_WIDTH_PROPERTY, 0);
+    logical_h = (long long)SDL_GetNumberProperty(
+        SDL_GetWindowProperties(window),
+        KMSDRM_PREROTATION_LOGICAL_HEIGHT_PROPERTY, 0);
+    CHECK(logical_w == (enabled ? 1280 : 0) && logical_h == (enabled ? 720 : 0),
+          "candidate preserves explicit logical size %lldx%lld (expected %dx%d)",
+          logical_w, logical_h, enabled ? 1280 : 0, enabled ? 720 : 0);
 
     renderer = SDL_CreateRenderer(window, "opengles2");
     if (!renderer) {
@@ -112,6 +120,8 @@ int main(void)
           "offscreen target keeps SDL's ordinary projection");
     CHECK(SDL_SetRenderTarget(renderer, NULL), "restore window render target");
 
+    SDL_GetWindowSize(window, &w, &h);
+    CHECK(w == 1280 && h == 720, "logical window remains %dx%d", w, h);
     SDL_GetWindowSizeInPixels(window, &w, &h);
     CHECK(w == 1280 && h == 720, "logical renderer output remains %dx%d", w, h);
     CHECK(SDL_SetRenderViewport(renderer, &viewport), "set asymmetric logical viewport");
