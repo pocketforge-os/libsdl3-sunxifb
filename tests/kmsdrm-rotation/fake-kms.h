@@ -16,6 +16,9 @@
 #define FAKE_KMS_PANEL_H 1280
 #define FAKE_KMS_BOS_PER_SURFACE 4
 #define FAKE_KMS_MAX_SURFACES 16
+#define FAKE_KMS_CURSOR_W 64
+#define FAKE_KMS_CURSOR_H 64
+#define FAKE_KMS_CURSOR_BYTES (FAKE_KMS_CURSOR_W * FAKE_KMS_CURSOR_H * 4)
 
 typedef struct FakeKmsSurfaceReport
 {
@@ -64,6 +67,31 @@ typedef struct FakeKmsReport
     int draws;
     FakeKmsDraw last_draw;
 
+    /* SDL_Renderer GLES2 draws are distinct from the imported-image rotate
+       pass above. These fields make the pre-rotation viewport/projection and
+       clip/scissor contract observable without modelling rasterization. */
+    int renderer_draws;
+    int renderer_target_surface;
+    int renderer_viewport[4];
+    int renderer_scissor[4];
+    float renderer_projection[16];
+    int renderer_texture_target_draws;
+    int renderer_texture_target_viewport[4];
+    float renderer_texture_target_projection[16];
+    int readpixels_calls;
+    int readpixels_rect[4];
+
+    /* Hardware-cursor coordinates submitted through drmModeMoveCursor. */
+    int cursor_move_calls;
+    int cursor_x, cursor_y;
+    int cursor_write_calls;
+    int cursor_bo_w, cursor_bo_h, cursor_bo_stride;
+    int cursor_bo_size;
+    unsigned char cursor_bo[FAKE_KMS_CURSOR_BYTES];
+    int cursor_set_calls;
+    int cursor_set_w, cursor_set_h;
+    int cursor_hot_x, cursor_hot_y;
+
     /* tsp-mc9m.41.924.16.13.3, SDL_KMSDRM_ROTATE_EXPERIMENT: glCopyTexSubImage2D
        calls (the copy texture then samples as the read framebuffer's image), and
        eglGetProcAddress lookups of the entry points only an experiment uses
@@ -83,6 +111,8 @@ typedef struct FakeKmsReport
     int scanouts;
     int scanout_surface;       // gbm surface index, -1 for a non-surface FB
     int scanout_w, scanout_h;
+    int scanout_color_valid;   // uniform clear colour carried by the scanned-out BO
+    float scanout_color[4];
     int plane_src_w, plane_src_h;   // atomic SRC_W/SRC_H >> 16 of the last commit
     int plane_crtc_w, plane_crtc_h;
     int atomic_commits;

@@ -31,6 +31,12 @@
  *                      device reports it unsupported; 2: the matching EGLConfig
  *                      is absent. Window creation must fail before allocating a
  *                      surface and leave nothing alive in either case
+ *   EXPECT_SINGLE_FRAME 1: use a non-fullscreen raw-GLES window, render one
+ *                      distinct clear colour, swap once, and require that
+ *                      exact colour on the fake scanout readback
+ *   EXPECT_CONTEXT_FAIL 1: the pre-render raw-GL fallback cannot load a GL
+ *                      entry point; 2: making its rotate context current
+ *                      fails. Context creation must fail cleanly either way
  *   FAKE_KMS_ATOMIC, FAKE_EGL_FENCE_SYNC, FAKE_EGL_NATIVE_FENCE,
  *   FAKE_KMS_FLIP_MS   (read by the fake too). With FAKE_KMS_FLIP_MS > 0 every
  *                      flip completes that long after its commit, and SDL must
@@ -118,6 +124,8 @@ int main(void)
     const int flip_ms = env_int("FAKE_KMS_FLIP_MS", 0);
     const int expect_window_fail = env_int("EXPECT_WINDOW_FAIL", 0);
     const int expect_vulkan_window = env_int("EXPECT_VULKAN_WINDOW", 0);
+    const int expect_single_frame = env_int("EXPECT_SINGLE_FRAME", 0);
+    const int expect_context_fail = env_int("EXPECT_CONTEXT_FAIL", 0);
     const int expect_makecurrent_fail = env_int("EXPECT_MAKECURRENT_FAIL", 0);
     const int expect_format_fail = env_int("EXPECT_FORMAT_FAIL", 0);
     const int expect_source_rgb565 = env_int("EXPECT_SOURCE_RGB565", 0);
@@ -131,7 +139,7 @@ int main(void)
     const int swaps_axes = expect_rotation == 90 || expect_rotation == 270;
     const int lw = swaps_axes ? FAKE_KMS_PANEL_H : FAKE_KMS_PANEL_W;
     const int lh = swaps_axes ? FAKE_KMS_PANEL_W : FAKE_KMS_PANEL_H;
-    const int frames = 8;
+    const int frames = expect_single_frame ? 1 : 8;
     void *fake;
     FakeKmsGetReportFn get_report;
     const FakeKmsReport *report;
@@ -202,7 +210,7 @@ int main(void)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
     window = SDL_CreateWindow("kmsdrm-rotation", desktop ? desktop->w : lw, desktop ? desktop->h : lh,
-                              SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
+                              SDL_WINDOW_OPENGL | (expect_single_frame ? 0 : SDL_WINDOW_FULLSCREEN));
     if (expect_format_fail) {
         printf("SDL_CreateWindow: %s (%s)\n", window ? "created" : "failed", window ? "" : SDL_GetError());
         CHECK(!window, "unavailable requested RGB565 source fails GL window creation");
@@ -271,6 +279,44 @@ int main(void)
               expect_app_rotation);
     }
     context = SDL_GL_CreateContext(window);
+    if (expect_context_fail) {
+        CHECK(!context, "raw-GL fallback failure prevents context creation%s%s",
+              context ? "" : ": ", context ? "" : SDL_GetError());
+        if (expect_context_fail == 1) {
+            CHECK(report->omitted_proc_requests > 0,
+                  "early fallback attempted the unavailable rotate entry point (%d requests)",
+                  report->omitted_proc_requests);
+            CHECK(report->injected_makecurrent_failures == 0,
+                  "missing-entry-point control injected no eglMakeCurrent failure (%d injected failures)",
+                  report->injected_makecurrent_failures);
+        } else {
+            CHECK(report->omitted_proc_requests == 0,
+                  "eglMakeCurrent-failure control loaded every rotate entry point (%d missing requests)",
+                  report->omitted_proc_requests);
+            CHECK(report->injected_makecurrent_failures == 1,
+                  "early fallback hit the injected eglMakeCurrent failure (%d injected failures)",
+                  report->injected_makecurrent_failures);
+        }
+        if (context) {
+            SDL_GL_DestroyContext(context);
+        }
+        for (i = 0; i < report->surfaces_created; ++i) {
+            alive += report->surfaces[i].alive;
+            locked += report->surfaces[i].locked_now;
+        }
+        CHECK(alive == 0 && locked == 0 && report->egl_surfaces_alive == 0 &&
+                  report->contexts_alive == 0 && report->images_alive == 0 && report->syncs_alive == 0,
+              "failed early fallback leaves no GBM surface (%d), locked buffer (%d), EGL surface (%d), "
+              "context (%d), image (%d), or sync (%d) alive",
+              alive, locked, report->egl_surfaces_alive, report->contexts_alive,
+              report->images_alive, report->syncs_alive);
+        CHECK(report->errors == 0, "the fake display stack saw %d contract violations%s%s", report->errors,
+              report->errors ? "; first: " : "", report->first_error);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        printf("RESULT: %s\n", failures ? "FAIL" : "PASS");
+        return failures ? 1 : 0;
+    }
     if (!context || !SDL_GL_MakeCurrent(window, context)) {
         printf("FAIL: GL context: %s\n", SDL_GetError());
         return 1;
@@ -328,13 +374,17 @@ int main(void)
         bool ok;
         SDL_GetWindowSizeInPixels(window, &w, &h);
         glViewportFn(0, 0, w, h);
-        glClearColorFn(0.1f * (float)i, 0.2f, 0.3f, 1.0f);
+        if (expect_single_frame) {
+            glClearColorFn(0.25f, 0.5f, 0.75f, 1.0f);
+        } else {
+            glClearColorFn(0.1f * (float)i, 0.2f, 0.3f, 1.0f);
+        }
         glClearFn(GL_COLOR_BUFFER_BIT);
         ok = SDL_GL_SwapWindow(window);
         /* Frame 1 follows SDL's fullscreen switch, which marks the surfaces for
            recreation. Upstream's atomic paths then commit an empty request and
            return false for that one swap; that is not what this test measures. */
-        if (i >= 2) {
+        if (expect_single_frame || i >= 2) {
             CHECK(ok, "frame %d: SDL_GL_SwapWindow %s", i, ok ? "succeeded" : SDL_GetError());
         }
         CHECK(report->current_ctx == (void *)context,
@@ -358,6 +408,14 @@ int main(void)
           app_surface >= 0 ? report->surfaces[app_surface].format : 0u);
     CHECK(report->scanouts > 0 && report->scanout_w == FAKE_KMS_PANEL_W && report->scanout_h == FAKE_KMS_PANEL_H,
           "the panel scans out a %dx%d buffer (%d scanouts)", report->scanout_w, report->scanout_h, report->scanouts);
+    if (expect_single_frame) {
+        CHECK(report->scanout_color_valid &&
+                  report->scanout_color[0] == 0.25f && report->scanout_color[1] == 0.5f &&
+                  report->scanout_color[2] == 0.75f && report->scanout_color[3] == 1.0f,
+              "one-swap scanout readback is the distinct RGBA colour %.2f,%.2f,%.2f,%.2f",
+              report->scanout_color[0], report->scanout_color[1],
+              report->scanout_color[2], report->scanout_color[3]);
+    }
     if (atomic && flip_ms > 0) {
         CHECK(report->busy_commits == 0,
               "flips take %d ms: no nonblocking commit reached a pending flip (%d -EBUSY)", flip_ms,
@@ -401,7 +459,13 @@ int main(void)
                   (report->surfaces[present].flags & GBM_BO_USE_SCANOUT),
               "the scanned-out buffer comes from the ARGB8888 720x1280 scanout surface, not the application's");
         CHECK(report->contexts_alive == 2, "application context plus one rotate context (%d contexts)", report->contexts_alive);
-        CHECK(report->draws >= frames - 2, "%d rotate passes for %d frames", report->draws, frames);
+        if (expect_single_frame) {
+            CHECK(report->draws == 1 && draw->source_frame == 1,
+                  "the one raw-GLES frame is rotated exactly once (draws %d, source frame %d)",
+                  report->draws, draw->source_frame);
+        } else {
+            CHECK(report->draws >= frames - 2, "%d rotate passes for %d frames", report->draws, frames);
+        }
         CHECK(draw->ctx != (void *)context, "the rotate pass ran in its own context, not the application's");
         CHECK(draw->target_surface == present, "the rotate pass drew into the present surface");
         CHECK(draw->source_surface == app_surface && draw->source_w == lw && draw->source_h == lh,

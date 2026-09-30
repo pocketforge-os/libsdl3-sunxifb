@@ -25,9 +25,39 @@
 
 #include "SDL_kmsdrmvideo.h"
 #include "SDL_kmsdrmmouse.h"
+#include "SDL_kmsdrmprerotate.h"
 #include "SDL_kmsdrmdyn.h"
 
 #include "../../events/SDL_mouse_c.h"
+
+static int KMSDRM_CursorPreRotation(SDL_Window *window)
+{
+    SDL_WindowData *windata = window ? window->internal : NULL;
+
+    if (!windata || !windata->rotation ||
+        !SDL_GetBooleanProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_ACTIVE_PROPERTY, false)) {
+        return 0;
+    }
+    return windata->rotation;
+}
+
+static void KMSDRM_LogicalCursorToPhysical(SDL_Window *window, float logical_x, float logical_y,
+                                           int *physical_x, int *physical_y)
+{
+    int logical_w = 0, logical_h = 0;
+    const int rotation = KMSDRM_CursorPreRotation(window);
+    const int x = (int)SDL_roundf(logical_x);
+    const int y = (int)SDL_roundf(logical_y);
+
+    if (!rotation) {
+        *physical_x = x;
+        *physical_y = y;
+        return;
+    }
+    SDL_GetWindowSize(window, &logical_w, &logical_h);
+    KMSDRM_RotationLogicalToPhysical(rotation, logical_w, logical_h,
+                                     x, y, physical_x, physical_y);
+}
 #include "../../events/default_cursor.h"
 
 #include "../SDL_pixels_c.h"
@@ -177,9 +207,10 @@ static bool KMSDRM_DumpCursorToBO(SDL_VideoDisplay *display, SDL_Mouse *mouse, S
     size_t bo_stride;
     size_t bufsize;
     uint8_t *ready_buffer = NULL;
-    uint8_t *src_row;
+    int cursor_w, cursor_h, hot_x, hot_y;
+    const int rotation = KMSDRM_CursorPreRotation(mouse->focus);
 
-    int i, rc;
+    int rc;
     bool result = true;
 
     if (!curdata || !dispdata->cursor_bo) {
@@ -198,11 +229,23 @@ static bool KMSDRM_DumpCursorToBO(SDL_VideoDisplay *display, SDL_Mouse *mouse, S
         goto cleanup;
     }
 
-    // Copy from the cursor buffer to a buffer that we can dump to the GBM BO.
-    for (i = 0; i < curdata->h; i++) {
-        src_row = &((uint8_t *)curdata->buffer)[i * curdata->w * 4];
-        SDL_memcpy(ready_buffer + (i * bo_stride), src_row, (size_t)4 * curdata->w);
+    KMSDRM_PreRotationPhysicalSize(rotation, curdata->w, curdata->h,
+                                   &cursor_w, &cursor_h);
+    KMSDRM_RotationLogicalToPhysical(rotation, curdata->w, curdata->h,
+                                     curdata->hot_x, curdata->hot_y,
+                                     &hot_x, &hot_y);
+    if ((uint64_t)cursor_w > dispdata->cursor_w ||
+        (uint64_t)cursor_h > dispdata->cursor_h) {
+        result = SDL_SetError("Cursor %dx%d does not fit the %" SDL_PRIu64 "x%" SDL_PRIu64 " DRM cursor BO",
+                              cursor_w, cursor_h, dispdata->cursor_w, dispdata->cursor_h);
+        goto cleanup;
     }
+
+    // Copy into the panel-native orientation expected by the cursor plane.
+    KMSDRM_PreRotationCopyLogicalToPhysical(rotation,
+                                            curdata->w, curdata->h, 4,
+                                            curdata->buffer, curdata->w * 4,
+                                            ready_buffer, (int)bo_stride);
 
     // Dump the cursor buffer to our GBM BO.
     if (KMSDRM_gbm_bo_write(dispdata->cursor_bo, ready_buffer, bufsize)) {
@@ -225,12 +268,14 @@ static bool KMSDRM_DumpCursorToBO(SDL_VideoDisplay *display, SDL_Mouse *mouse, S
         info.plane = dispdata->cursor_plane;
         info.crtc_id = dispdata->crtc.crtc->crtc_id;
         info.fb_id = fb->fb_id;
-        info.src_w = dispdata->cursor_w;
-        info.src_h = dispdata->cursor_h;
-        info.crtc_x = ((int32_t) SDL_roundf(mouse->x)) - curdata->hot_x;
-        info.crtc_y = ((int32_t) SDL_roundf(mouse->y)) - curdata->hot_y;
-        info.crtc_w = curdata->w;
-        info.crtc_h = curdata->h;
+        info.src_w = cursor_w;
+        info.src_h = cursor_h;
+        KMSDRM_LogicalCursorToPhysical(mouse->focus, mouse->x, mouse->y,
+                                       &info.crtc_x, &info.crtc_y);
+        info.crtc_x -= hot_x;
+        info.crtc_y -= hot_y;
+        info.crtc_w = cursor_w;
+        info.crtc_h = cursor_h;
         drm_atomic_set_plane_props(dispdata, &info);
         if (drm_atomic_commit(video_device, dispdata, true, false)) {
             result = SDL_SetError("Failed atomic commit in KMSDRM_ShowCursor.");
@@ -239,10 +284,10 @@ static bool KMSDRM_DumpCursorToBO(SDL_VideoDisplay *display, SDL_Mouse *mouse, S
     } else {
         // Put the GBM BO buffer on screen using the DRM interface.
         bo_handle = KMSDRM_gbm_bo_get_handle(dispdata->cursor_bo).u32;
-        if (curdata->hot_x == 0 && curdata->hot_y == 0) {
+        if (hot_x == 0 && hot_y == 0) {
             rc = KMSDRM_drmModeSetCursor(viddata->drm_fd, dispdata->crtc.crtc->crtc_id, bo_handle, dispdata->cursor_w, dispdata->cursor_h);
         } else {
-            rc = KMSDRM_drmModeSetCursor2(viddata->drm_fd, dispdata->crtc.crtc->crtc_id, bo_handle, dispdata->cursor_w, dispdata->cursor_h, curdata->hot_x, curdata->hot_y);
+            rc = KMSDRM_drmModeSetCursor2(viddata->drm_fd, dispdata->crtc.crtc->crtc_id, bo_handle, dispdata->cursor_w, dispdata->cursor_h, hot_x, hot_y);
         }
         if (rc < 0) {
             result = SDL_SetError("Failed to set DRM cursor: %s", strerror(-rc));
@@ -381,15 +426,22 @@ static bool KMSDRM_ShowCursor(SDL_Cursor *cursor)
     return result;
 }
 
-static void drm_atomic_movecursor(SDL_DisplayData *dispdata, const SDL_CursorData *curdata, uint16_t x, uint16_t y)
+static void drm_atomic_movecursor(SDL_Window *window, SDL_DisplayData *dispdata,
+                                  const SDL_CursorData *curdata, int x, int y)
 {
     if (dispdata->cursor_plane) {  // We can't move a non-existing cursor, but that's ok.
+        const int rotation = KMSDRM_CursorPreRotation(window);
+        int hot_x, hot_y;
+
+        KMSDRM_RotationLogicalToPhysical(rotation, curdata->w, curdata->h,
+                                         curdata->hot_x, curdata->hot_y,
+                                         &hot_x, &hot_y);
         // Do we have a set of changes already in the making? If not, allocate a new one.
         if (!dispdata->atomic_req) {
             dispdata->atomic_req = KMSDRM_drmModeAtomicAlloc();
         }
-        add_plane_property(dispdata->atomic_req, dispdata->cursor_plane, "CRTC_X", x - curdata->hot_x);
-        add_plane_property(dispdata->atomic_req, dispdata->cursor_plane, "CRTC_Y", y - curdata->hot_y);
+        add_plane_property(dispdata->atomic_req, dispdata->cursor_plane, "CRTC_X", x - hot_x);
+        add_plane_property(dispdata->atomic_req, dispdata->cursor_plane, "CRTC_Y", y - hot_y);
     }
 }
 
@@ -400,9 +452,11 @@ static bool KMSDRM_WarpMouseGlobal(float x, float y)
     if (mouse && mouse->cur_cursor && mouse->focus) {
         SDL_Window *window = mouse->focus;
         SDL_DisplayData *dispdata = SDL_GetDisplayDriverDataForWindow(window);
+        int physical_x, physical_y;
 
         // Update internal mouse position.
         SDL_SendMouseMotion(0, mouse->focus, SDL_GLOBAL_MOUSE_ID, false, x, y);
+        KMSDRM_LogicalCursorToPhysical(window, x, y, &physical_x, &physical_y);
 
         // And now update the cursor graphic position on screen.
         if (dispdata->cursor_bo) {
@@ -410,9 +464,10 @@ static bool KMSDRM_WarpMouseGlobal(float x, float y)
             SDL_VideoData *viddata = dev->internal;
             if (USE_ATOMIC_CURSOR && viddata->is_atomic) {
                 const SDL_CursorData *curdata = (const SDL_CursorData *) mouse->cur_cursor->internal;
-                drm_atomic_movecursor(dispdata, curdata, (uint16_t) (int) x, (uint16_t) (int) y);
+                drm_atomic_movecursor(window, dispdata, curdata, physical_x, physical_y);
             } else {
-                const int rc = KMSDRM_drmModeMoveCursor(dispdata->cursor_bo_drm_fd, dispdata->crtc.crtc->crtc_id, (int)x, (int)y);
+                const int rc = KMSDRM_drmModeMoveCursor(dispdata->cursor_bo_drm_fd, dispdata->crtc.crtc->crtc_id,
+                                                        physical_x, physical_y);
                 if (rc < 0) {
                     return SDL_SetError("drmModeMoveCursor() failed: %s", strerror(-rc));
                 }
@@ -470,10 +525,12 @@ static bool KMSDRM_MoveCursor(SDL_Cursor *cursor)
         SDL_DisplayData *dispdata = SDL_GetDisplayDriverDataForWindow(window);
         SDL_VideoDevice *dev = SDL_GetVideoDevice();
         SDL_VideoData *viddata = dev->internal;
+        int physical_x, physical_y;
 
         if (!dispdata->cursor_bo) {
             return SDL_SetError("Cursor not initialized properly.");
         }
+        KMSDRM_LogicalCursorToPhysical(window, mouse->x, mouse->y, &physical_x, &physical_y);
 
         if (USE_ATOMIC_CURSOR && viddata->is_atomic) {
             /* !!! FIXME: Some programs expect cursor movement even while they don't do SwapWindow() calls,
@@ -483,9 +540,10 @@ static bool KMSDRM_MoveCursor(SDL_Cursor *cursor)
                so a future solution is needed. SDLPoP "QUIT?" menu is an example of this
                situation. */
             const SDL_CursorData *curdata = (const SDL_CursorData *) mouse->cur_cursor->internal;
-            drm_atomic_movecursor(dispdata, curdata, (uint16_t) (int) mouse->x, (uint16_t) (int) mouse->y);
+            drm_atomic_movecursor(window, dispdata, curdata, physical_x, physical_y);
         } else {
-            const int rc = KMSDRM_drmModeMoveCursor(dispdata->cursor_bo_drm_fd, dispdata->crtc.crtc->crtc_id, (int)mouse->x, (int)mouse->y);
+            const int rc = KMSDRM_drmModeMoveCursor(dispdata->cursor_bo_drm_fd, dispdata->crtc.crtc->crtc_id,
+                                                    physical_x, physical_y);
             if (rc < 0) {
                 return SDL_SetError("drmModeMoveCursor() failed: %s", strerror(-rc));
             }

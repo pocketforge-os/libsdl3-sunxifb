@@ -48,6 +48,7 @@
 #include "SDL_kmsdrmopengles.h"
 #include "SDL_kmsdrmvulkan.h"
 #include "SDL_kmsdrmorientation.h"
+#include "SDL_kmsdrmprerotate.h"
 #include "SDL_kmsdrmrotate.h"
 #include "SDL_kmsdrmtiming.h"
 #include <dirent.h>
@@ -68,6 +69,8 @@ static int kmsdrm_dri_pathsize = 0;
 static char kmsdrm_dri_devname[8];
 static int kmsdrm_dri_devnamesize = 0;
 static char kmsdrm_dri_cardpath[32];
+
+static void KMSDRM_GetWindowSizeInPixels(SDL_VideoDevice *_this, SDL_Window *window, int *w, int *h);
 
 /* for older KMSDRM headers... */
 #ifndef DRM_FORMAT_MOD_VENDOR_NONE
@@ -731,6 +734,7 @@ static SDL_VideoDevice *KMSDRM_CreateDevice(void)
     device->SetWindowTitle = KMSDRM_SetWindowTitle;
     device->SetWindowPosition = KMSDRM_SetWindowPosition;
     device->SetWindowSize = KMSDRM_SetWindowSize;
+    device->GetWindowSizeInPixels = KMSDRM_GetWindowSizeInPixels;
     device->SetWindowFullscreen = KMSDRM_SetWindowFullscreen;
     device->ShowWindow = KMSDRM_ShowWindow;
     device->HideWindow = KMSDRM_HideWindow;
@@ -1810,6 +1814,8 @@ static void KMSDRM_DestroySurfaces(SDL_VideoDevice *_this, SDL_Window *window)
         KMSDRM_gbm_surface_destroy(windata->gs);
         windata->gs = NULL;
     }
+    windata->drawable_w = 0;
+    windata->drawable_h = 0;
 }
 
 static void KMSDRM_GetModeToSet(SDL_Window *window, drmModeModeInfo *out_mode)
@@ -1862,6 +1868,10 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
     uint32_t surface_fmt = GBM_FORMAT_ARGB8888;
     uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
     bool source_rgb565 = false;
+    const bool renderer_prerotation = windata->rotation != 0 &&
+                                      windata->renderer_prerotation_requested &&
+                                      !windata->renderer_prerotation_disabled;
+    int prerotation_logical_w = 0, prerotation_logical_h = 0;
     int surface_w, surface_h;
     int requested_red = 0, requested_green = 0, requested_blue = 0;
     int requested_alpha = 0, requested_buffer = 0;
@@ -1870,6 +1880,14 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
     EGLint egl_visual_id = 0;
 
     bool result = true;
+
+    /* The public window remains logical even though this candidate's GBM/EGL
+       drawable is panel-native. Capture the logical size before rebuilding so
+       the resize notification below can keep all SDL window fields in that
+       coordinate space. */
+    if (renderer_prerotation) {
+        SDL_GetWindowSize(window, &prerotation_logical_w, &prerotation_logical_h);
+    }
 
     // If the current window already has surfaces, destroy them before creating other.
     if (windata->gs) {
@@ -1880,7 +1898,7 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
        so RGB565 can halve the pass's source bytes without an intermediate
        conversion. Keep this opt-in until its colour/banding and performance
        gates have been checked on the device. */
-    if (windata->rotation != 0 && source_format && *source_format) {
+    if (windata->rotation != 0 && !renderer_prerotation && source_format && *source_format) {
         if (SDL_strcmp(source_format, "rgb565") == 0) {
             surface_fmt = GBM_FORMAT_RGB565;
             surface_flags = GBM_BO_USE_RENDERING;
@@ -1940,10 +1958,16 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
      */
     KMSDRM_GetModeToSet(window, &dispdata->mode);
 
-    /* PocketForge: the application's surface has the logical size; with a
-       rotated present the panel-native one is made by KMSDRM_Rotate_Create. */
-    KMSDRM_RotationLogicalSize(windata->rotation, dispdata->mode.hdisplay, dispdata->mode.vdisplay,
-                               &surface_w, &surface_h);
+    /* The opt-in GLES2 SDL_Renderer path draws directly into the panel-native
+       surface. Otherwise the application surface stays logical and the
+       ordinary rotated-present path makes a second panel-native surface. */
+    if (renderer_prerotation) {
+        surface_w = dispdata->mode.hdisplay;
+        surface_h = dispdata->mode.vdisplay;
+    } else {
+        KMSDRM_RotationLogicalSize(windata->rotation, dispdata->mode.hdisplay, dispdata->mode.vdisplay,
+                                   &surface_w, &surface_h);
+    }
 
     windata->gs = KMSDRM_gbm_surface_create(viddata->gbm_dev,
                                             surface_w, surface_h,
@@ -1983,7 +2007,7 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
         goto cleanup;
     }
 
-    if (windata->rotation != 0) {
+    if (windata->rotation != 0 && !renderer_prerotation) {
         if (!KMSDRM_Rotate_Create(_this, window, windata->rotation,
                                   dispdata->mode.hdisplay, dispdata->mode.vdisplay)) {
             result = false;
@@ -1995,6 +2019,12 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
     } else {
         windata->present_gs = windata->gs;
         windata->present_egl_surface = windata->egl_surface;
+        if (renderer_prerotation) {
+            SDL_SetNumberProperty(SDL_GetWindowProperties(window),
+                                  KMSDRM_PREROTATION_WINDOW_PROPERTY, windata->rotation);
+            SDL_Log("KMSDRM SDL_Renderer pre-rotation candidate: rotation=%d surface=%dx%d",
+                    windata->rotation, surface_w, surface_h);
+        }
     }
 
     /* Current context passing to EGL is now done here. If something fails,
@@ -2002,7 +2032,16 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
     egl_context = (EGLContext)SDL_GL_GetCurrentContext();
     result = SDL_EGL_MakeCurrent(_this, windata->egl_surface, egl_context);
 
-    SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESIZED, surface_w, surface_h);
+    if (result) {
+        windata->drawable_w = surface_w;
+        windata->drawable_h = surface_h;
+        if (renderer_prerotation) {
+            SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESIZED,
+                                prerotation_logical_w, prerotation_logical_h);
+        } else {
+            SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESIZED, surface_w, surface_h);
+        }
+    }
 
     windata->egl_surface_dirty = false;
 
@@ -2028,6 +2067,8 @@ cleanup:
             KMSDRM_gbm_surface_destroy(windata->gs);
             windata->gs = NULL;
         }
+        windata->drawable_w = 0;
+        windata->drawable_h = 0;
     }
 
     return result;
@@ -2366,6 +2407,8 @@ bool KMSDRM_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_Propert
 
         // PocketForge: GL windows on a sideways panel are presented rotated.
         windata->rotation = dispdata->present_rotation;
+        windata->renderer_prerotation_requested =
+            windata->rotation != 0 && SDL_GetHintBoolean(SDL_HINT_KMSDRM_RENDERER_PREROTATION, false);
 
         /* Create the window surfaces with the size we have just chosen.
            Needs the window driverdata in place. */
@@ -2436,6 +2479,20 @@ void KMSDRM_SetWindowSize(SDL_VideoDevice *_this, SDL_Window *window)
     SDL_VideoData *viddata = _this->internal;
     if (!viddata->vulkan_mode) {
         KMSDRM_DirtySurfaces(window);
+    }
+}
+
+static void KMSDRM_GetWindowSizeInPixels(SDL_VideoDevice *_this, SDL_Window *window, int *w, int *h)
+{
+    SDL_WindowData *windata = window->internal;
+
+    (void)_this;
+    if (windata && windata->drawable_w > 0 && windata->drawable_h > 0) {
+        *w = windata->drawable_w;
+        *h = windata->drawable_h;
+    } else {
+        *w = window->w;
+        *h = window->h;
     }
 }
 SDL_FullscreenResult KMSDRM_SetWindowFullscreen(SDL_VideoDevice *_this, SDL_Window *window, SDL_VideoDisplay *display, SDL_FullscreenOp fullscreen)

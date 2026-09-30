@@ -28,6 +28,11 @@
 #include "../../video/SDL_pixels_c.h"
 #include "SDL_shaders_gles2.h"
 
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+#include "../../video/kmsdrm/SDL_kmsdrmprerotate.h"
+#include "../../events/SDL_mouse_c.h"
+#endif
+
 /* WebGL doesn't offer client-side arrays, so use Vertex Buffer Objects
    on Emscripten, which converts GLES2 into WebGL calls.
    In all other cases, attempt to use client-side arrays, as they tend to
@@ -176,6 +181,11 @@ typedef struct GLES2_RenderData
 {
     SDL_GLContext context;
 
+    /* Nonzero only after the KMSDRM pre-rotation handshake succeeds. */
+    int kmsdrm_prerotation;
+    int logical_drawablew;
+    int logical_drawableh;
+
     bool debug_enabled;
 
     bool GL_OES_EGL_image_external_supported;
@@ -313,10 +323,37 @@ static void GLES2_WindowEvent(SDL_Renderer *renderer, const SDL_WindowEvent *eve
 {
     GLES2_RenderData *data = (GLES2_RenderData *)renderer->internal;
 
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+    if (data->kmsdrm_prerotation && event->type == SDL_EVENT_WINDOW_RESIZED &&
+        event->data1 > 0 && event->data2 > 0) {
+        data->logical_drawablew = event->data1;
+        data->logical_drawableh = event->data2;
+        data->drawstate.viewport_dirty = true;
+        data->drawstate.cliprect_dirty = true;
+    }
+#endif
     if (event->type == SDL_EVENT_WINDOW_MINIMIZED) {
         // According to Apple documentation, we need to finish drawing NOW!
         data->glFinish();
     }
+}
+
+static bool GLES2_GetOutputSize(SDL_Renderer *renderer, int *w, int *h)
+{
+    GLES2_RenderData *data = (GLES2_RenderData *)renderer->internal;
+
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+    if (data->kmsdrm_prerotation) {
+        if (w) {
+            *w = data->logical_drawablew;
+        }
+        if (h) {
+            *h = data->logical_drawableh;
+        }
+        return true;
+    }
+#endif
+    return SDL_GetWindowSizeInPixels(renderer->window, w, h);
 }
 
 static GLenum GetBlendFunc(SDL_BlendFactor factor)
@@ -1023,13 +1060,33 @@ static bool SetDrawState(GLES2_RenderData *data, const SDL_RenderCommand *cmd, c
 
     if (data->drawstate.viewport_dirty) {
         const SDL_Rect *viewport = &data->drawstate.viewport;
-        data->glViewport(viewport->x,
-                         data->drawstate.target ? viewport->y : (data->drawstate.drawableh - viewport->y - viewport->h),
-                         viewport->w, viewport->h);
-        if (viewport->w && viewport->h) {
-            data->drawstate.projection[0][0] = 2.0f / viewport->w;
-            data->drawstate.projection[1][1] = (data->drawstate.target ? 2.0f : -2.0f) / viewport->h;
-            data->drawstate.projection[3][1] = data->drawstate.target ? -1.0f : 1.0f;
+        if (!data->drawstate.target && data->kmsdrm_prerotation) {
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+            const KMSDRM_PreRotationRect logical = { viewport->x, viewport->y, viewport->w, viewport->h };
+            KMSDRM_PreRotationRect physical;
+            KMSDRM_PreRotationLogicalRectToPhysical(data->kmsdrm_prerotation,
+                                                    data->logical_drawablew, data->logical_drawableh,
+                                                    &logical, &physical);
+            data->glViewport(physical.x, data->drawstate.drawableh - physical.y - physical.h,
+                             physical.w, physical.h);
+            if (viewport->w && viewport->h) {
+                KMSDRM_PreRotationProjection(data->kmsdrm_prerotation, viewport->w, viewport->h,
+                                             (float *)data->drawstate.projection);
+            }
+#endif
+        } else {
+            data->glViewport(viewport->x,
+                             data->drawstate.target ? viewport->y : (data->drawstate.drawableh - viewport->y - viewport->h),
+                             viewport->w, viewport->h);
+            if (viewport->w && viewport->h) {
+                SDL_zeroa(data->drawstate.projection);
+                data->drawstate.projection[0][0] = 2.0f / viewport->w;
+                data->drawstate.projection[1][1] = (data->drawstate.target ? 2.0f : -2.0f) / viewport->h;
+                data->drawstate.projection[2][2] = 1.0f;
+                data->drawstate.projection[3][0] = -1.0f;
+                data->drawstate.projection[3][1] = data->drawstate.target ? -1.0f : 1.0f;
+                data->drawstate.projection[3][3] = 1.0f;
+            }
         }
         data->drawstate.viewport_dirty = false;
     }
@@ -1046,9 +1103,29 @@ static bool SetDrawState(GLES2_RenderData *data, const SDL_RenderCommand *cmd, c
     if (data->drawstate.cliprect_enabled && data->drawstate.cliprect_dirty) {
         const SDL_Rect *viewport = &data->drawstate.viewport;
         const SDL_Rect *rect = &data->drawstate.cliprect;
-        data->glScissor(viewport->x + rect->x,
-                        data->drawstate.target ? viewport->y + rect->y : data->drawstate.drawableh - viewport->y - rect->y - rect->h,
-                        rect->w, rect->h);
+        if (!data->drawstate.target && data->kmsdrm_prerotation) {
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+            const KMSDRM_PreRotationRect logical_viewport = { viewport->x, viewport->y, viewport->w, viewport->h };
+            const KMSDRM_PreRotationRect logical_clip = { rect->x, rect->y, rect->w, rect->h };
+            KMSDRM_PreRotationRect physical_viewport;
+            KMSDRM_PreRotationRect physical_clip;
+            KMSDRM_PreRotationLogicalRectToPhysical(data->kmsdrm_prerotation,
+                                                    data->logical_drawablew, data->logical_drawableh,
+                                                    &logical_viewport, &physical_viewport);
+            KMSDRM_PreRotationLogicalRectToPhysical(data->kmsdrm_prerotation,
+                                                    viewport->w, viewport->h,
+                                                    &logical_clip, &physical_clip);
+            physical_clip.x += physical_viewport.x;
+            physical_clip.y += physical_viewport.y;
+            data->glScissor(physical_clip.x,
+                            data->drawstate.drawableh - physical_clip.y - physical_clip.h,
+                            physical_clip.w, physical_clip.h);
+#endif
+        } else {
+            data->glScissor(viewport->x + rect->x,
+                            data->drawstate.target ? viewport->y + rect->y : data->drawstate.drawableh - viewport->y - rect->y - rect->h,
+                            rect->w, rect->h);
+        }
         data->drawstate.cliprect_dirty = false;
     }
 
@@ -1434,12 +1511,30 @@ static bool GLES2_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderCommand *cmd
     data->drawstate.target = renderer->target;
     if (!data->drawstate.target) {
         int w, h;
-        SDL_GetWindowSizeInPixels(renderer->window, &w, &h);
-        if ((w != data->drawstate.drawablew) || (h != data->drawstate.drawableh)) {
+        int drawablew, drawableh;
+        if (data->kmsdrm_prerotation) {
+            /* The EGL drawable is panel-native, while renderer coordinates
+               and output size remain in the public logical window space. */
+            w = data->logical_drawablew;
+            h = data->logical_drawableh;
+        } else {
+            SDL_GetWindowSizeInPixels(renderer->window, &w, &h);
+        }
+        drawablew = w;
+        drawableh = h;
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+        if (data->kmsdrm_prerotation) {
+            KMSDRM_PreRotationPhysicalSize(data->kmsdrm_prerotation, w, h, &drawablew, &drawableh);
+        }
+#endif
+        if ((w != data->logical_drawablew) || (h != data->logical_drawableh) ||
+            (drawablew != data->drawstate.drawablew) || (drawableh != data->drawstate.drawableh)) {
             data->drawstate.viewport_dirty = true; // if the window dimensions changed, invalidate the current viewport, etc.
             data->drawstate.cliprect_dirty = true;
-            data->drawstate.drawablew = w;
-            data->drawstate.drawableh = h;
+            data->logical_drawablew = w;
+            data->logical_drawableh = h;
+            data->drawstate.drawablew = drawablew;
+            data->drawstate.drawableh = drawableh;
         }
     }
 
@@ -1633,6 +1728,11 @@ static void GLES2_DestroyRenderer(SDL_Renderer *renderer)
 
     // Deallocate everything
     if (data) {
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+        if (data->kmsdrm_prerotation && renderer->window) {
+            SDL_ClearProperty(SDL_GetWindowProperties(renderer->window), KMSDRM_PREROTATION_ACTIVE_PROPERTY);
+        }
+#endif
         GLES2_ActivateRenderer(renderer);
 
         {
@@ -2235,6 +2335,50 @@ static SDL_Surface *GLES2_RenderReadPixels(SDL_Renderer *renderer, const SDL_Rec
     SDL_PixelFormat format = renderer->target ? renderer->target->format : SDL_PIXELFORMAT_RGBA32;
     SDL_Surface *surface;
 
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+    if (!renderer->target && data->kmsdrm_prerotation) {
+        int logical_w, logical_h, physical_w, physical_h;
+        const KMSDRM_PreRotationRect logical = { rect->x, rect->y, rect->w, rect->h };
+        KMSDRM_PreRotationRect physical;
+        SDL_Surface *physical_surface;
+
+        logical_w = data->logical_drawablew;
+        logical_h = data->logical_drawableh;
+        if (!logical_w || !logical_h) {
+            SDL_GetWindowSize(renderer->window, &logical_w, &logical_h);
+        }
+        KMSDRM_PreRotationPhysicalSize(data->kmsdrm_prerotation, logical_w, logical_h,
+                                       &physical_w, &physical_h);
+        (void)physical_w;
+        KMSDRM_PreRotationLogicalRectToPhysical(data->kmsdrm_prerotation, logical_w, logical_h,
+                                                &logical, &physical);
+        physical_surface = SDL_CreateSurfaceUninitialized(physical.w, physical.h, format);
+        if (!physical_surface) {
+            return NULL;
+        }
+        data->glReadPixels(physical.x, physical_h - physical.y - physical.h,
+                           physical.w, physical.h, GL_RGBA, GL_UNSIGNED_BYTE,
+                           physical_surface->pixels);
+        if (!GL_CheckError("glReadPixels()", renderer)) {
+            SDL_DestroySurface(physical_surface);
+            return NULL;
+        }
+        SDL_FlipSurface(physical_surface, SDL_FLIP_VERTICAL);
+
+        surface = SDL_CreateSurfaceUninitialized(rect->w, rect->h, format);
+        if (!surface) {
+            SDL_DestroySurface(physical_surface);
+            return NULL;
+        }
+        KMSDRM_PreRotationCopyPhysicalToLogical(data->kmsdrm_prerotation,
+                                                rect->w, rect->h, SDL_BYTESPERPIXEL(format),
+                                                physical_surface->pixels, physical_surface->pitch,
+                                                surface->pixels, surface->pitch);
+        SDL_DestroySurface(physical_surface);
+        return surface;
+    }
+#endif
+
     surface = SDL_CreateSurfaceUninitialized(rect->w, rect->h, format);
     if (!surface) {
         return NULL;
@@ -2341,6 +2485,7 @@ static bool GLES2_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL
 
     // Populate the function pointers for the module
     renderer->WindowEvent = GLES2_WindowEvent;
+    renderer->GetOutputSize = GLES2_GetOutputSize;
     renderer->SupportsBlendMode = GLES2_SupportsBlendMode;
     renderer->CreatePalette = GLES2_CreatePalette;
     renderer->UpdatePalette = GLES2_UpdatePalette;
@@ -2367,6 +2512,26 @@ static bool GLES2_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL
     renderer->DestroyRenderer = GLES2_DestroyRenderer;
     renderer->SetVSync = GLES2_SetVSync;
     renderer->name = GLES2_RenderDriver.name;
+
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+    /* Publish support before SDL_GL_CreateContext enters KMSDRM. Raw GL and
+       unsupported GL renderers do not publish this handshake, so KMSDRM can
+       select their ordinary rotated-present surfaces before they render. */
+    data->kmsdrm_prerotation = (int)SDL_GetNumberProperty(SDL_GetWindowProperties(window),
+                                                          KMSDRM_PREROTATION_WINDOW_PROPERTY, 0);
+    SDL_GetWindowSize(window, &data->logical_drawablew, &data->logical_drawableh);
+    if (data->kmsdrm_prerotation && KMSDRM_RotationIsValid(data->kmsdrm_prerotation)) {
+        if (data->logical_drawablew > 0 && data->logical_drawableh > 0) {
+            SDL_SetBooleanProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_ACTIVE_PROPERTY, true);
+            SDL_Log("KMSDRM SDL_Renderer pre-rotation active: renderer=opengles2 rotation=%d logical=%dx%d",
+                    data->kmsdrm_prerotation, data->logical_drawablew, data->logical_drawableh);
+        } else {
+            data->kmsdrm_prerotation = 0;
+        }
+    } else {
+        data->kmsdrm_prerotation = 0;
+    }
+#endif
 
     // Create an OpenGL ES 2.0 context
     SDL_GL_SetAttribute(SDL_GL_FRAMEBUFFER_SRGB_CAPABLE, 0);
@@ -2462,6 +2627,14 @@ static bool GLES2_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL
     data->drawstate.projection[3][3] = 1.0f;
 
     GL_CheckError("", renderer);
+
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+    /* The default cursor may have been uploaded before renderer negotiation
+       made pre-rotation active. Re-upload it against the final transform. */
+    if (data->kmsdrm_prerotation) {
+        SDL_RedrawCursor();
+    }
+#endif
 
     return true;
 

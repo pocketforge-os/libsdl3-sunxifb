@@ -2665,6 +2665,25 @@ extern "C" {
 #define SDL_HINT_KMSDRM_ATOMIC "SDL_KMSDRM_ATOMIC"
 
 /**
+ * A variable that lets the KMSDRM OpenGL ES 2 SDL_Renderer draw directly in
+ * panel orientation instead of using SDL's rotated-present copy.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": use the ordinary rotated-present path. (default)
+ * - "1": allow the OpenGL ES 2 SDL_Renderer to pre-rotate its window output.
+ *
+ * This is currently supported only for SDL_Renderer using the OpenGL ES 2
+ * renderer. Other renderers and raw GL clients automatically fall back to the
+ * ordinary rotated-present path.
+ *
+ * This hint should be set before creating the window.
+ *
+ * \since This hint is available in the PocketForge SDL fork.
+ */
+#define SDL_HINT_KMSDRM_RENDERER_PREROTATION "SDL_KMSDRM_RENDERER_PREROTATION"
+
+/**
  * A variable controlling the default SDL log levels.
  *
  * This variable is a comma separated set of category=level tokens that define

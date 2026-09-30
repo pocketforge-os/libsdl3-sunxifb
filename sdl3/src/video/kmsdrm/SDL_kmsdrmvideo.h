@@ -197,6 +197,10 @@ struct SDL_WindowData
 
     EGLSurface egl_surface;
     bool egl_surface_dirty;
+    /* Pixel/drawable dimensions of gs. These differ from the public logical
+       window size while SDL_Renderer pre-rotation is a candidate. */
+    int drawable_w;
+    int drawable_h;
 
     /* This dictates what approach we'll use for SwapBuffers. */
     bool (*swap_window)(SDL_VideoDevice *_this, SDL_Window *window);
@@ -207,6 +211,10 @@ struct SDL_WindowData
        egl_surface are the application's logical-size surface and the present
        pair is the panel-native one that SDL_kmsdrmrotate.c renders into. */
     int rotation;
+    /* Default-off SDL_Renderer direct-to-physical-surface negotiation. The
+       renderer must set the active window property before first swap. */
+    bool renderer_prerotation_requested;
+    bool renderer_prerotation_disabled;
     struct gbm_surface *present_gs;
     EGLSurface present_egl_surface;
     struct KMSDRM_Rotate *rotate;
