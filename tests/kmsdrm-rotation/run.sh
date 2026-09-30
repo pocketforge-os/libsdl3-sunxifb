@@ -36,9 +36,10 @@
 #   7. red       the base commit's SDL must fail the twiddle experiment
 #                scenario: it has no experiments, so no witness line and no
 #                copy (tsp-mc9m.41.924.16.13.3; skipped once the base has them).
-#   8. red       the base commit must fail the RGB565 rotated-source scenario:
-#                it ignores the opt-in and keeps the app surface ARGB8888
-#                (tsp-mc9m.41.924.16.13.3.1; skipped once the base has it).
+#   8. red       a pinned commit immediately before the RGB565 implementation
+#                must fail the RGB565 rotated-source scenario: it ignores the
+#                opt-in and keeps the app surface ARGB8888
+#                (tsp-mc9m.41.924.16.13.3.1).
 set -euo pipefail
 
 SRC=${SRC:-/src}
@@ -453,6 +454,15 @@ if ! FAKE_DIR="$WORK/fake-nolink" EXPECT_CONTEXT_FAIL=1 SDL_KMSDRM_RENDERER_PRER
     failed+=(prerotate-raw-fallback-fails)
     sed 's/^/    /' "$WORK/case-prerotate-raw-fallback-fails.log"
 fi
+# The round-3 pre-render fallback also cleans up if initializing the rotate
+# context fails after both replacement surfaces have been allocated. Surface 2
+# is the fallback's rotate target (surface 0 was the discarded candidate).
+if ! FAKE_EGL_FAIL_MAKECURRENT_SURFACE=2 EXPECT_CONTEXT_FAIL=2 \
+    SDL_KMSDRM_RENDERER_PREROTATION=1 \
+    run_case prerotate-raw-makecurrent-fails head "Left Side Up" 1 1 1 "" 90 90; then
+    failed+=(prerotate-raw-makecurrent-fails)
+    sed 's/^/    /' "$WORK/case-prerotate-raw-makecurrent-fails.log"
+fi
 
 if [ "${#failed[@]}" -ne 0 ]; then
     echo "FAIL: backend scenarios: ${failed[*]}" >&2
@@ -514,7 +524,8 @@ fi
 step "6. red: the base commit's wait for the previous flip"
 if [ -z "$BASE_SHA" ] || ! git -C "$SRC" cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
     echo "SKIP: no base commit given (BASE_SHA)"
-elif git -C "$SRC" show "$BASE_SHA:sdl3/src/video/kmsdrm/SDL_kmsdrmvideo.h" 2>/dev/null | grep -q kms_out_fence_wait_fd; then
+elif git -C "$SRC" grep -q kms_out_fence_wait_fd "$BASE_SHA" -- \
+     sdl3/src/video/kmsdrm/SDL_kmsdrmvideo.h 2>/dev/null; then
     echo "SKIP: base $BASE_SHA already waits on the OUT_FENCE itself"
 else
     if [ ! -d "$WORK/prefix-base" ]; then
@@ -540,7 +551,8 @@ fi
 step "7. red: the base commit's SDL has no rotate-pass experiments"
 if [ -z "$BASE_SHA" ] || ! git -C "$SRC" cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
     echo "SKIP: no base commit given (BASE_SHA)"
-elif git -C "$SRC" show "$BASE_SHA:sdl3/src/video/kmsdrm/SDL_kmsdrmrotategl.h" 2>/dev/null | grep -q SDL_KMSDRM_ROTATE_EXPERIMENT; then
+elif git -C "$SRC" grep -q SDL_KMSDRM_ROTATE_EXPERIMENT "$BASE_SHA" -- \
+     sdl3/src/video/kmsdrm/SDL_kmsdrmrotategl.h 2>/dev/null; then
     echo "SKIP: base $BASE_SHA already has the experiments"
 else
     if [ ! -d "$WORK/prefix-base" ]; then
@@ -561,29 +573,25 @@ else
     echo "ok: the base SDL ignores SDL_KMSDRM_ROTATE_EXPERIMENT=twiddle (no copy, no witness): the arm needs this change"
 fi
 
-step "8. red: the base commit's SDL ignores the RGB565 rotate-source opt-in"
-if [ -z "$BASE_SHA" ] || ! git -C "$SRC" cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
-    echo "SKIP: no base commit given (BASE_SHA)"
-elif git -C "$SRC" show "$BASE_SHA:sdl3/src/video/kmsdrm/SDL_kmsdrmvideo.c" 2>/dev/null | \
-     grep -q SDL_KMSDRM_ROTATE_SOURCE_FORMAT; then
-    echo "SKIP: base $BASE_SHA already has the RGB565 rotate-source opt-in"
+RGB565_MISSING_SHA=2c63b318f0d1b1f9eeb82b29bb14856d38d19bd9
+step "8. red: RGB565 rotate-source opt-in before its fix ($RGB565_MISSING_SHA)"
+if ! git -C "$SRC" cat-file -e "$RGB565_MISSING_SHA^{commit}" 2>/dev/null; then
+    echo "SKIP: $RGB565_MISSING_SHA is not in this checkout"
 else
-    if [ ! -d "$WORK/prefix-base" ]; then
-        mkdir -p "$WORK/base-src"
-        git -C "$SRC" archive "$BASE_SHA" sdl3 | tar -x -C "$WORK/base-src"
-        build_sdl "$WORK/base-src" base
-    fi
+    mkdir -p "$WORK/rgb565-missing-src"
+    git -C "$SRC" archive "$RGB565_MISSING_SHA" sdl3 | tar -x -C "$WORK/rgb565-missing-src"
+    build_sdl "$WORK/rgb565-missing-src" rgb565-missing
     if SDL_KMSDRM_ROTATE_SOURCE_FORMAT=rgb565 EXPECT_SOURCE_RGB565=1 \
-        run_case base-rgb565-rsu base "Right Side Up" 1 1 1 "" 270 270; then
-        echo "FAIL: the base SDL passed the RGB565 source scenario; the test does not detect the missing opt-in" >&2
+        run_case missing-rgb565-rsu rgb565-missing "Right Side Up" 1 1 1 "" 270 270; then
+        echo "FAIL: $RGB565_MISSING_SHA passed the RGB565 source scenario; the test does not detect the missing opt-in" >&2
         exit 1
     fi
-    if ! grep -q 'FAIL: the application surface format is RGB565' "$WORK/case-base-rgb565-rsu.log"; then
-        echo "FAIL: the base SDL failed the RGB565 scenario, but not on its ARGB8888 source:" >&2
-        sed 's/^/    /' "$WORK/case-base-rgb565-rsu.log" >&2
+    if ! grep -q 'FAIL: the application surface format is RGB565' "$WORK/case-missing-rgb565-rsu.log"; then
+        echo "FAIL: $RGB565_MISSING_SHA failed the RGB565 scenario, but not on its ARGB8888 source:" >&2
+        sed 's/^/    /' "$WORK/case-missing-rgb565-rsu.log" >&2
         exit 1
     fi
-    echo "ok: the base SDL keeps the rotated application source ARGB8888, the defect this change fixes"
+    echo "ok: $RGB565_MISSING_SHA keeps the rotated application source ARGB8888, the defect fixed by the RGB565 opt-in"
 fi
 
 step "RESULT: PASS"

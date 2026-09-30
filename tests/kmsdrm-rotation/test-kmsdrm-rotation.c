@@ -34,8 +34,9 @@
  *   EXPECT_SINGLE_FRAME 1: use a non-fullscreen raw-GLES window, render one
  *                      distinct clear colour, swap once, and require that
  *                      exact colour on the fake scanout readback
- *   EXPECT_CONTEXT_FAIL 1: the pre-render raw-GL fallback cannot initialize
- *                      its rotate path; context creation must fail cleanly
+ *   EXPECT_CONTEXT_FAIL 1: the pre-render raw-GL fallback cannot load a GL
+ *                      entry point; 2: making its rotate context current
+ *                      fails. Context creation must fail cleanly either way
  *   FAKE_KMS_ATOMIC, FAKE_EGL_FENCE_SYNC, FAKE_EGL_NATIVE_FENCE,
  *   FAKE_KMS_FLIP_MS   (read by the fake too). With FAKE_KMS_FLIP_MS > 0 every
  *                      flip completes that long after its commit, and SDL must
@@ -281,9 +282,21 @@ int main(void)
     if (expect_context_fail) {
         CHECK(!context, "raw-GL fallback failure prevents context creation%s%s",
               context ? "" : ": ", context ? "" : SDL_GetError());
-        CHECK(report->omitted_proc_requests > 0,
-              "early fallback attempted the unavailable rotate entry point (%d requests)",
-              report->omitted_proc_requests);
+        if (expect_context_fail == 1) {
+            CHECK(report->omitted_proc_requests > 0,
+                  "early fallback attempted the unavailable rotate entry point (%d requests)",
+                  report->omitted_proc_requests);
+            CHECK(report->injected_makecurrent_failures == 0,
+                  "missing-entry-point control injected no eglMakeCurrent failure (%d injected failures)",
+                  report->injected_makecurrent_failures);
+        } else {
+            CHECK(report->omitted_proc_requests == 0,
+                  "eglMakeCurrent-failure control loaded every rotate entry point (%d missing requests)",
+                  report->omitted_proc_requests);
+            CHECK(report->injected_makecurrent_failures == 1,
+                  "early fallback hit the injected eglMakeCurrent failure (%d injected failures)",
+                  report->injected_makecurrent_failures);
+        }
         if (context) {
             SDL_GL_DestroyContext(context);
         }
