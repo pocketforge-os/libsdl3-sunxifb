@@ -41,6 +41,8 @@
  * Built with -DFAKE_KMS_OMIT_GL_LINK_PROGRAM, the stack lacks glLinkProgram (an
  * entry point in the middle of the rotate pass's table): it is neither exported
  * (dlsym fails) nor returned by eglGetProcAddress.
+ * FAKE_KMS_OMIT_GL_COPY_TEX_SUB_IMAGE does the same for an entry point in the
+ * optional experiment/load-elision table.
  */
 #define _GNU_SOURCE
 #define EGL_EGLEXT_PROTOTYPES 1
@@ -2134,6 +2136,7 @@ FAKE_EXPORT void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size
 
 /* The read framebuffer's image becomes what the bound texture samples: a model
    of copying the application's frame into a texture the rotate context owns. */
+#ifndef FAKE_KMS_OMIT_GL_COPY_TEX_SUB_IMAGE
 FAKE_EXPORT void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y,
                                      GLsizei width, GLsizei height)
 {
@@ -2154,6 +2157,7 @@ FAKE_EXPORT void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, 
     dst->image = src->image;
     g_report.copies++;
 }
+#endif
 
 FAKE_EXPORT void glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
@@ -2289,7 +2293,10 @@ static const struct
     FAKE_PROC(glUniform1i), FAKE_PROC(glUniform3f), FAKE_PROC(glUniform4f), FAKE_PROC(glUniformMatrix3fv),
     FAKE_PROC(glUniformMatrix4fv), FAKE_PROC(glUseProgram), FAKE_PROC(glVertexAttribPointer), FAKE_PROC(glViewport),
     FAKE_PROC(glEGLImageTargetTexture2DOES),
-    FAKE_PROC(glBindFramebuffer), FAKE_PROC(glCheckFramebufferStatus), FAKE_PROC(glCopyTexSubImage2D),
+    FAKE_PROC(glBindFramebuffer), FAKE_PROC(glCheckFramebufferStatus),
+#ifndef FAKE_KMS_OMIT_GL_COPY_TEX_SUB_IMAGE
+    FAKE_PROC(glCopyTexSubImage2D),
+#endif
     FAKE_PROC(glDeleteFramebuffers), FAKE_PROC(glFramebufferTexture2D), FAKE_PROC(glGenFramebuffers),
     FAKE_PROC(glTexImage2D), FAKE_PROC(glGenBuffers), FAKE_PROC(glDeleteBuffers), FAKE_PROC(glBindBuffer),
     FAKE_PROC(glBufferData), FAKE_PROC(glBufferSubData),
@@ -2317,6 +2324,13 @@ FAKE_EXPORT __eglMustCastToProperFunctionPointerType eglGetProcAddress(const cha
 #ifdef FAKE_KMS_OMIT_GL_LINK_PROGRAM
     if (strcmp(procname, "glLinkProgram") == 0) {
         g_report.omitted_proc_requests++;
+        return NULL;
+    }
+#endif
+#ifdef FAKE_KMS_OMIT_GL_COPY_TEX_SUB_IMAGE
+    if (strcmp(procname, "glCopyTexSubImage2D") == 0) {
+        g_report.omitted_proc_requests++;
+        g_report.experiment_proc_requests++;
         return NULL;
     }
 #endif

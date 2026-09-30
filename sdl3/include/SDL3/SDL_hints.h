@@ -2670,8 +2670,9 @@ extern "C" {
  *
  * The variable can be set to the following values:
  *
- * - "0": use the ordinary rotated-present path. (default)
+ * - "0": use the ordinary rotated-present path.
  * - "1": allow the OpenGL ES 2 SDL_Renderer to pre-rotate its window output.
+ *   (default)
  *
  * This is currently supported only for SDL_Renderer using the OpenGL ES 2
  * renderer. Other renderers and raw GL clients automatically fall back to the
@@ -2682,6 +2683,27 @@ extern "C" {
  * \since This hint is available in the PocketForge SDL fork.
  */
 #define SDL_HINT_KMSDRM_RENDERER_PREROTATION "SDL_KMSDRM_RENDERER_PREROTATION"
+
+/**
+ * A variable that controls load elision on the KMSDRM rotated-present pass.
+ *
+ * The legacy rotate pass overwrites the complete panel surface. Clearing that
+ * surface immediately before the draw lets tile-based GPUs avoid loading its
+ * previous contents without changing the resulting pixels.
+ *
+ * The variable can be set to the following values:
+ *
+ * - "0": use the legacy draw-only rotate pass.
+ * - "1": clear the complete target before the rotate draw. (default)
+ *
+ * `SDL_KMSDRM_ROTATE_EXPERIMENT` continues to override this policy for an
+ * explicitly selected benchmark arm.
+ *
+ * This hint should be set before creating the window.
+ *
+ * \since This hint is available in the PocketForge SDL fork.
+ */
+#define SDL_HINT_KMSDRM_ROTATE_LOAD_ELISION "SDL_KMSDRM_ROTATE_LOAD_ELISION"
 
 /**
  * A variable controlling the default SDL log levels.

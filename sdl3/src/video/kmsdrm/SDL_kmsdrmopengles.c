@@ -88,8 +88,8 @@ void KMSDRM_GLES_UnloadLibrary(SDL_VideoDevice *_this)
        so we manually unload the library whenever we want. */
 }
 
-/* Resolve the opt-in before a context can submit application rendering. The
-   GLES2 SDL_Renderer publishes the active property before creating its
+/* Resolve the pre-rotation candidate before a context can submit application
+   rendering. The GLES2 SDL_Renderer publishes the active property before creating its
    context; raw GL and other GL renderers do not, so they are moved to the
    established logical-surface plus rotated-present path here. */
 static bool KMSDRM_GLES_ResolvePreRotation(SDL_VideoDevice *_this, SDL_Window *window)

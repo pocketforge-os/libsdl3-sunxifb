@@ -53,7 +53,6 @@ int main(void)
 
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "kmsdrm");
     SDL_SetHint(SDL_HINT_KMSDRM_DEVICE_INDEX, "0");
-    SDL_SetHint(SDL_HINT_KMSDRM_RENDERER_PREROTATION, enabled ? "1" : "0");
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         printf("FAIL: SDL_Init: %s\n", SDL_GetError());
         return 1;

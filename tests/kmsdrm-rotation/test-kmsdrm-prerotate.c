@@ -1,10 +1,12 @@
 /*
- * tsp-mc9m.41.924.16.13.3.3: exercise the opt-in SDL_Renderer pre-rotation
+ * tsp-mc9m.41.924.16.13.3.3: exercise the SDL_Renderer pre-rotation
  * handshake through SDL's real KMSDRM and GLES2 renderer implementations.
  * The fake display stack records GL geometry, surface ownership and scanout.
  *
- * EXPECT_PREROTATE=1 is the positive case. EXPECT_PREROTATE=0 is the
- * negative control: the same renderer uses the established rotate pass.
+ * EXPECT_PREROTATE=1 is the positive case. EXPECT_PREROTATE=0 is the explicit
+ * opt-out control: the same renderer uses the established rotate pass. The
+ * harness selects the hint through the environment, including leaving it
+ * absent to exercise the default.
  */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -90,7 +92,6 @@ int main(void)
 
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "kmsdrm");
     SDL_SetHint(SDL_HINT_KMSDRM_DEVICE_INDEX, "0");
-    SDL_SetHint(SDL_HINT_KMSDRM_RENDERER_PREROTATION, enabled ? "1" : "0");
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         printf("FAIL: SDL_Init: %s\n", SDL_GetError());
         return 1;

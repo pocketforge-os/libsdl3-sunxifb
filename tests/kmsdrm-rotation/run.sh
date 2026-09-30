@@ -27,7 +27,8 @@
 #                The same app also runs every SDL_KMSDRM_ROTATE_EXPERIMENT pass
 #                (tsp-mc9m.41.924.16.13.3): each must say it is on, keep the
 #                present path working, and do what it names; an unknown name is
-#                ignored, and without one no experiment entry point is touched;
+#                ignored. Without one, the default load-elision path is checked
+#                alongside its explicit opt-out and unavailable-proc fallback;
 #   6. red       with flips that take time to complete (FAKE_KMS_FLIP_MS), the
 #                base commit's SDL must hit -EBUSY on a nonblocking commit,
 #                because its wait for the previous flip is an EGL fence wait
@@ -131,6 +132,7 @@ build_fake() {
 }
 build_fake "$WORK/fake"
 build_fake "$WORK/fake-nolink" -DFAKE_KMS_OMIT_GL_LINK_PROGRAM
+build_fake "$WORK/fake-noexp" -DFAKE_KMS_OMIT_GL_COPY_TEX_SUB_IMAGE
 # The app's own sources are held to -Werror; SDL's public headers are not ours.
 # shellcheck disable=SC2046
 cc -std=c99 -O1 -g -Wall -Wextra "${NOX11[@]}" $(pkg-config --cflags gbm) \
@@ -169,9 +171,12 @@ run_case() {
         FAKE_KMS_FLIP_MS="${FAKE_KMS_FLIP_MS:-}" \
         SDL_KMSDRM_PRESENT_TIMING="${SDL_KMSDRM_PRESENT_TIMING:-}" \
         SDL_KMSDRM_ROTATE_EXPERIMENT="${SDL_KMSDRM_ROTATE_EXPERIMENT:-}" \
+        SDL_KMSDRM_ROTATE_LOAD_ELISION="${SDL_KMSDRM_ROTATE_LOAD_ELISION:-}" \
         SDL_KMSDRM_ROTATE_SOURCE_FORMAT="${SDL_KMSDRM_ROTATE_SOURCE_FORMAT:-}" \
         SDL_KMSDRM_RENDERER_PREROTATION="${SDL_KMSDRM_RENDERER_PREROTATION:-}" \
         EXPECT_EXPERIMENT="${EXPECT_EXPERIMENT:-}" \
+        EXPECT_LOAD_ELISION="${EXPECT_LOAD_ELISION:-1}" \
+        EXPECT_LOAD_ELISION_UNAVAILABLE="${EXPECT_LOAD_ELISION_UNAVAILABLE:-0}" \
         FAKE_GBM_RGB565="${FAKE_GBM_RGB565:-1}" \
         FAKE_EGL_RGB565="${FAKE_EGL_RGB565:-1}" \
         FAKE_KMS_PANEL_ORIENTATION="$orientation" FAKE_KMS_ATOMIC="$atomic" \
@@ -208,6 +213,23 @@ lsu-no-fence-sync   Left_Side_Up   1 0 0 - 90  90
 lsu-opt-out         Left_Side_Up   1 1 1 0 0   90
 EOF
 
+# The load-elision opt-out restores the former draw-only legacy rotate pass.
+# Its default-on positive and explicit-opt-out negative run in this invocation.
+if ! SDL_KMSDRM_ROTATE_LOAD_ELISION=0 EXPECT_LOAD_ELISION=0 \
+    run_case load-elision-opt-out head "Left Side Up" 1 1 1 "" 90 90; then
+    failed+=(load-elision-opt-out)
+    sed 's/^/    /' "$WORK/case-load-elision-opt-out.log"
+fi
+# An incomplete optional GL table safely restores the same draw-only path and
+# emits a witness. The default-on positive cases above prove the normal branch.
+if ! { FAKE_DIR="$WORK/fake-noexp" EXPECT_LOAD_ELISION=0 EXPECT_LOAD_ELISION_UNAVAILABLE=1 \
+       run_case load-elision-unavailable head "Left Side Up" 1 1 1 "" 90 90 &&
+       grep -q 'KMSDRM rotated present load elision: GLES2 entry points are missing; using the legacy load path' \
+           "$WORK/case-load-elision-unavailable.log"; }; then
+    failed+=(load-elision-unavailable)
+    sed 's/^/    /' "$WORK/case-load-elision-unavailable.log"
+fi
+
 # tsp-mc9m.41.924.16.13.3.1: a direct RGB565 application drawable halves the
 # bytes sampled by the rotate pass. Positive 90/270 cases retain the same
 # geometry checks as the ARGB scenarios above; the ordinary lsu-fenced case is
@@ -238,12 +260,14 @@ if ! SDL_KMSDRM_ROTATE_SOURCE_FORMAT=rgb565 \
     failed+=(rgb565-normal)
     sed 's/^/    /' "$WORK/case-rgb565-normal.log"
 fi
-if ! FAKE_GBM_RGB565=0 SDL_KMSDRM_ROTATE_SOURCE_FORMAT=rgb565 EXPECT_FORMAT_FAIL=1 \
+if ! FAKE_GBM_RGB565=0 SDL_KMSDRM_RENDERER_PREROTATION=0 \
+    SDL_KMSDRM_ROTATE_SOURCE_FORMAT=rgb565 EXPECT_FORMAT_FAIL=1 \
     run_case rgb565-unsupported head "Left Side Up" 1 1 1 "" 90 90; then
     failed+=(rgb565-unsupported)
     sed 's/^/    /' "$WORK/case-rgb565-unsupported.log"
 fi
-if ! FAKE_EGL_RGB565=0 SDL_KMSDRM_ROTATE_SOURCE_FORMAT=rgb565 EXPECT_FORMAT_FAIL=2 \
+if ! FAKE_EGL_RGB565=0 SDL_KMSDRM_RENDERER_PREROTATION=0 \
+    SDL_KMSDRM_ROTATE_SOURCE_FORMAT=rgb565 EXPECT_FORMAT_FAIL=2 \
     run_case rgb565-no-egl-config head "Right Side Up" 1 1 1 "" 270 270; then
     failed+=(rgb565-no-egl-config)
     sed 's/^/    /' "$WORK/case-rgb565-no-egl-config.log"
@@ -269,7 +293,7 @@ done
 # The final eglMakeCurrent of the frame-1 surface rebuild fails (gbm surface 2 is
 # the rebuilt application surface: 0 and 1 are the first application and present
 # surfaces). The swap fails and nothing the rebuild made may stay alive.
-if ! FAKE_EGL_FAIL_MAKECURRENT_SURFACE=2 EXPECT_MAKECURRENT_FAIL=1 \
+if ! FAKE_EGL_FAIL_MAKECURRENT_SURFACE=2 EXPECT_MAKECURRENT_FAIL=1 SDL_KMSDRM_RENDERER_PREROTATION=0 \
     run_case lsu-makecurrent-fails head "Left Side Up" 1 1 1 "" 90 90; then
     failed+=(lsu-makecurrent-fails)
     sed 's/^/    /' "$WORK/case-lsu-makecurrent-fails.log"
@@ -278,7 +302,7 @@ fi
 # A GL entry point missing in the middle of the rotate pass's table: window
 # creation fails cleanly (nothing called through the missing entry point, no
 # surface, buffer, context or sync left behind).
-if ! FAKE_DIR="$WORK/fake-nolink" EXPECT_WINDOW_FAIL=1 \
+if ! FAKE_DIR="$WORK/fake-nolink" EXPECT_WINDOW_FAIL=1 SDL_KMSDRM_RENDERER_PREROTATION=0 \
     run_case lsu-gl-load-fails head "Left Side Up" 1 1 1 "" 90 90; then
     failed+=(lsu-gl-load-fails)
     sed 's/^/    /' "$WORK/case-lsu-gl-load-fails.log"
@@ -391,6 +415,13 @@ for spec in "exp-sample0-rsu|sample0|Right Side Up|270" "exp-clear-rsu|clear|Rig
         sed 's/^/    /' "$WORK/case-$name.log"
     fi
 done
+# The bench selector remains authoritative even when the new default is opted
+# out: an explicit loadclear arm still runs and emits its experiment witness.
+if ! { SDL_KMSDRM_ROTATE_LOAD_ELISION=0 experiment_case exp-loadclear-optout loadclear "Left Side Up" 90 &&
+       witness exp-loadclear-optout loadclear; }; then
+    failed+=(exp-loadclear-optout)
+    sed 's/^/    /' "$WORK/case-exp-loadclear-optout.log"
+fi
 # The arms as the bench runs them: flips that take time, level-2 timing.
 for experiment in sample0 clear loadclear twiddle; do
     name=exp-$experiment-flip-t2
@@ -423,12 +454,18 @@ for name in lsu-fenced rsu-fenced flip-rsu-fenced-t2; do
     fi
 done
 
-# The Stage A handshake has 90/270-degree positives and two controls in this
-# invocation: the same SDL_Renderer without the hint, and raw GLES with it.
-while read -r name orientation rotation enabled; do
+# The Stage A handshake has absent-hint 90/270-degree positives, explicit-on
+# compatibility, and an explicit opt-out in this invocation.
+while read -r name orientation rotation enabled hint; do
     log="$WORK/case-$name.log"
     rc=0
-    env LD_LIBRARY_PATH="$WORK/fake:$WORK/prefix-head/lib" \
+    hint_args=()
+    if [ "$hint" = default ]; then
+        hint_args=(-u SDL_KMSDRM_RENDERER_PREROTATION)
+    else
+        hint_args=("SDL_KMSDRM_RENDERER_PREROTATION=$hint")
+    fi
+    env "${hint_args[@]}" LD_LIBRARY_PATH="$WORK/fake:$WORK/prefix-head/lib" \
         FAKE_KMS_PANEL_ORIENTATION="${orientation//_/ }" FAKE_KMS_ATOMIC=1 \
         FAKE_EGL_NATIVE_FENCE=1 FAKE_EGL_FENCE_SYNC=1 FAKE_GBM_CURSOR=1 \
         EXPECT_ROTATION=$rotation EXPECT_PREROTATE=$enabled \
@@ -439,16 +476,23 @@ while read -r name orientation rotation enabled; do
         sed 's/^/    /' "$log"
     fi
 done <<'EOF'
-prerotate-renderer-off Left_Side_Up 90 0
-prerotate-renderer-lsu Left_Side_Up 90 1
-prerotate-renderer-rsu Right_Side_Up 270 1
+prerotate-renderer-default-lsu Left_Side_Up 90 1 default
+prerotate-renderer-default-rsu Right_Side_Up 270 1 default
+prerotate-renderer-explicit-on Left_Side_Up 90 1 1
+prerotate-renderer-opt-out Left_Side_Up 90 0 0
 EOF
 # Cursor bitmap, footprint and hotspot use the same panel transform as the
 # direct-rendered primary plane. The Normal case is the byte-identical control.
-while read -r name orientation rotation enabled; do
+while read -r name orientation rotation enabled hint; do
     log="$WORK/case-$name.log"
     rc=0
-    env LD_LIBRARY_PATH="$WORK/fake:$WORK/prefix-head/lib" \
+    hint_args=()
+    if [ "$hint" = default ]; then
+        hint_args=(-u SDL_KMSDRM_RENDERER_PREROTATION)
+    else
+        hint_args=("SDL_KMSDRM_RENDERER_PREROTATION=$hint")
+    fi
+    env "${hint_args[@]}" LD_LIBRARY_PATH="$WORK/fake:$WORK/prefix-head/lib" \
         FAKE_KMS_PANEL_ORIENTATION="${orientation//_/ }" FAKE_KMS_ATOMIC=1 \
         FAKE_EGL_NATIVE_FENCE=1 FAKE_EGL_FENCE_SYNC=1 FAKE_GBM_CURSOR=1 \
         EXPECT_ROTATION=$rotation EXPECT_PREROTATE=$enabled \
@@ -459,21 +503,43 @@ while read -r name orientation rotation enabled; do
         sed 's/^/    /' "$log"
     fi
 done <<'EOF'
-prerotate-cursor-normal Normal 0 1
-prerotate-cursor-off Left_Side_Up 90 0
-prerotate-cursor-lsu Left_Side_Up 90 1
-prerotate-cursor-upside-down Upside_Down 180 1
-prerotate-cursor-rsu Right_Side_Up 270 1
+prerotate-cursor-normal Normal 0 1 default
+prerotate-cursor-opt-out Left_Side_Up 90 0 0
+prerotate-cursor-lsu Left_Side_Up 90 1 default
+prerotate-cursor-upside-down Upside_Down 180 1 default
+prerotate-cursor-rsu Right_Side_Up 270 1 default
 EOF
-if ! SDL_KMSDRM_RENDERER_PREROTATION=1 \
-    run_case prerotate-raw-fallback head "Left Side Up" 1 1 1 "" 90 90; then
+fallback_witness() {  # case
+    local name=$1
+    grep -q 'KMSDRM SDL_Renderer pre-rotation fallback before GL rendering: no supported renderer handshake' \
+        "$WORK/case-$name.log"
+}
+if ! { run_case prerotate-raw-fallback head "Left Side Up" 1 1 1 "" 90 90 &&
+       fallback_witness prerotate-raw-fallback; }; then
     failed+=(prerotate-raw-fallback)
     sed 's/^/    /' "$WORK/case-prerotate-raw-fallback.log"
 fi
-if ! EXPECT_SINGLE_FRAME=1 SDL_KMSDRM_RENDERER_PREROTATION=1 \
-    run_case prerotate-raw-one-frame head "Left Side Up" 1 1 1 "" 90 90; then
+if ! { EXPECT_SINGLE_FRAME=1 \
+       run_case prerotate-raw-one-frame head "Left Side Up" 1 1 1 "" 90 90 &&
+       fallback_witness prerotate-raw-one-frame; }; then
     failed+=(prerotate-raw-one-frame)
     sed 's/^/    /' "$WORK/case-prerotate-raw-one-frame.log"
+fi
+# Explicit Stage A opt-out enters today's legacy path directly and therefore
+# must not emit the renderer-negotiation fallback witness.
+if ! { SDL_KMSDRM_RENDERER_PREROTATION=0 \
+       run_case prerotate-raw-opt-out head "Left Side Up" 1 1 1 "" 90 90 &&
+       ! fallback_witness prerotate-raw-opt-out; }; then
+    failed+=(prerotate-raw-opt-out)
+    sed 's/^/    /' "$WORK/case-prerotate-raw-opt-out.log"
+fi
+# With both defaults opted out, the raw client takes the exact former path:
+# no candidate fallback witness and no pre-overwrite clear.
+if ! { SDL_KMSDRM_RENDERER_PREROTATION=0 SDL_KMSDRM_ROTATE_LOAD_ELISION=0 EXPECT_LOAD_ELISION=0 \
+       run_case defaults-opt-out head "Left Side Up" 1 1 1 "" 90 90 &&
+       ! fallback_witness defaults-opt-out; }; then
+    failed+=(defaults-opt-out)
+    sed 's/^/    /' "$WORK/case-defaults-opt-out.log"
 fi
 if ! FAKE_DIR="$WORK/fake-nolink" EXPECT_CONTEXT_FAIL=1 SDL_KMSDRM_RENDERER_PREROTATION=1 \
     run_case prerotate-raw-fallback-fails head "Left Side Up" 1 1 1 "" 90 90; then

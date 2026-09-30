@@ -67,8 +67,9 @@ struct KMSDRM_Rotate
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES;
     bool have_fences;
 
-    // SDL_KMSDRM_ROTATE_EXPERIMENT (tsp-mc9m.41.924.16.13.3); NONE by default.
+    // Explicit benchmark arm, or the default/opt-out load-elision policy.
     KMSDRM_RotateExperiment experiment;
+    KMSDRM_RotateExperiment default_experiment;
     KMSDRM_RotateGLExp exp;
     GLuint copy_texture; // twiddle: the lw x lh copy the rotated draw samples
     int lw, lh;
@@ -130,30 +131,42 @@ static void KMSDRM_Rotate_WaitFence(SDL_VideoDevice *_this, EGLSyncKHR fence)
     }
 }
 
-/* SDL_KMSDRM_ROTATE_EXPERIMENT (tsp-mc9m.41.924.16.13.3, see
-   SDL_kmsdrmrotategl.h). Runs once, with the rotate context current. Any
-   failure leaves the ordinary rotate pass: an experiment never fails a window.
-   The witness line says which pass the run actually drew. */
+/* Resolve the default load-elision policy and any explicit
+   SDL_KMSDRM_ROTATE_EXPERIMENT (see SDL_kmsdrmrotategl.h). Runs once, with the
+   rotate context current. Any setup failure leaves a safe draw-only or default
+   pass: an experiment never fails a window. Witness lines name explicit
+   experiments only. */
 static void KMSDRM_Rotate_SetupExperiment(SDL_VideoDevice *_this, struct KMSDRM_Rotate *rot)
 {
     const char *value = SDL_GetHint(SDL_HINT_KMSDRM_ROTATE_EXPERIMENT);
+    const bool load_elision = SDL_GetHintBoolean(SDL_HINT_KMSDRM_ROTATE_LOAD_ELISION, true);
     int recognised = 1;
     KMSDRM_RotateExperiment experiment = KMSDRM_RotateGL_ParseExperiment(value, &recognised);
+    KMSDRM_RotateExperiment selected;
+    bool explicit_experiment;
 
-    rot->experiment = KMSDRM_ROTATE_EXPERIMENT_NONE;
+    rot->default_experiment = load_elision ? KMSDRM_ROTATE_EXPERIMENT_LOADCLEAR : KMSDRM_ROTATE_EXPERIMENT_NONE;
+    rot->experiment = rot->default_experiment;
     if (!recognised) {
         SDL_Log("KMSDRM rotated present: ignoring unknown SDL_KMSDRM_ROTATE_EXPERIMENT '%s'", value);
-        return;
     }
-    if (experiment == KMSDRM_ROTATE_EXPERIMENT_NONE) {
+    explicit_experiment = recognised && experiment != KMSDRM_ROTATE_EXPERIMENT_NONE;
+    selected = explicit_experiment ? experiment : rot->default_experiment;
+    if (selected == KMSDRM_ROTATE_EXPERIMENT_NONE) {
         return;
     }
     if (!KMSDRM_RotateGL_LoadExp(&rot->exp, KMSDRM_Rotate_GetProc, _this)) {
-        SDL_Log("KMSDRM rotated present experiment %s: GLES2 entry points are missing; not applied",
-                KMSDRM_RotateGL_ExperimentName(experiment));
+        if (explicit_experiment) {
+            SDL_Log("KMSDRM rotated present experiment %s: GLES2 entry points are missing; not applied",
+                    KMSDRM_RotateGL_ExperimentName(experiment));
+        } else {
+            SDL_Log("KMSDRM rotated present load elision: GLES2 entry points are missing; using the legacy load path");
+        }
+        rot->default_experiment = KMSDRM_ROTATE_EXPERIMENT_NONE;
+        rot->experiment = KMSDRM_ROTATE_EXPERIMENT_NONE;
         return;
     }
-    if (experiment == KMSDRM_ROTATE_EXPERIMENT_TWIDDLE) {
+    if (selected == KMSDRM_ROTATE_EXPERIMENT_TWIDDLE) {
         KMSDRM_RotationLogicalSize(rot->rotation, rot->pw, rot->ph, &rot->lw, &rot->lh);
         rot->copy_texture = KMSDRM_RotateGL_CreateCopyTexture(&rot->gl, &rot->exp, rot->lw, rot->lh);
         if (!rot->copy_texture) {
@@ -162,8 +175,10 @@ static void KMSDRM_Rotate_SetupExperiment(SDL_VideoDevice *_this, struct KMSDRM_
             return;
         }
     }
-    rot->experiment = experiment;
-    SDL_Log("KMSDRM rotated present experiment: %s", KMSDRM_RotateGL_ExperimentName(experiment));
+    rot->experiment = selected;
+    if (explicit_experiment) {
+        SDL_Log("KMSDRM rotated present experiment: %s", KMSDRM_RotateGL_ExperimentName(experiment));
+    }
 }
 
 void KMSDRM_Rotate_Destroy(SDL_VideoDevice *_this, SDL_Window *window)
@@ -384,7 +399,7 @@ static GLuint KMSDRM_Rotate_TwiddleCopy(struct KMSDRM_Rotate *rot, KMSDRM_Rotate
         !KMSDRM_RotateGL_CopyToTexture(&rot->gl, &rot->exp, slot->read_fbo, rot->copy_texture, rot->lw, rot->lh)) {
         SDL_Log("KMSDRM rotated present experiment twiddle: the copy failed (%s); drawing without it from now on",
                 slot->read_fbo ? "glCopyTexSubImage2D" : "incomplete read framebuffer");
-        rot->experiment = KMSDRM_ROTATE_EXPERIMENT_NONE;
+        rot->experiment = rot->default_experiment;
         return slot->texture;
     }
     return rot->copy_texture;
