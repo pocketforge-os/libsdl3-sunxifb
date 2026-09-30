@@ -248,9 +248,9 @@ static inline void KMSDRM_RotateGL_Fini(KMSDRM_RotateGL *gl)
 
 /* tsp-mc9m.41.924.16.13.3: device experiments on the rotate pass, selected by
    SDL_KMSDRM_ROTATE_EXPERIMENT. They exist to attribute the rotate pass's GPU
-   time on the device (one boot, no rebuild per arm), and are off by default:
-   unset (or empty), the pass makes exactly the calls it always made and never
-   resolves the entry points below.
+   time on the device (one boot, no rebuild per arm). An explicit selector
+   overrides the default load-elision policy; unset (or empty) is not itself
+   an experiment and produces no experiment witness.
 
      sample0    the same draw with the 0-degree quad: the landscape image
                 squeezed onto the panel, unrotated. It reads every source cache

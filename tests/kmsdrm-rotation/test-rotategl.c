@@ -107,7 +107,7 @@ static int sample0_matches(int pw, int ph, int x, int y, uint32_t got)
 }
 
 static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation,
-               KMSDRM_RotateExperiment experiment, int rgb565)
+               KMSDRM_RotateExperiment experiment, int rgb565, unsigned char *capture)
 {
     const char *name = KMSDRM_RotateGL_ExperimentName(experiment);
     const char *source_name = rgb565 ? "rgb565" : "rgba8888";
@@ -246,6 +246,9 @@ static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation,
     if (mismatches) {
         ++failures;
     }
+    if (capture) {
+        memcpy(capture, out, (size_t)pw * ph * 4);
+    }
 
     if (texture) {
         gl.DeleteTextures(1, &texture);
@@ -317,9 +320,8 @@ int main(void)
     };
     static const EGLint context_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
     static const int rotations[] = { 90, 270, 180, 0 };
-    static const KMSDRM_RotateExperiment experiments[] = {
-        KMSDRM_ROTATE_EXPERIMENT_NONE, KMSDRM_ROTATE_EXPERIMENT_LOADCLEAR, KMSDRM_ROTATE_EXPERIMENT_TWIDDLE,
-        KMSDRM_ROTATE_EXPERIMENT_SAMPLE0, KMSDRM_ROTATE_EXPERIMENT_CLEAR
+    static const KMSDRM_RotateExperiment diagnostic_experiments[] = {
+        KMSDRM_ROTATE_EXPERIMENT_TWIDDLE, KMSDRM_ROTATE_EXPERIMENT_SAMPLE0, KMSDRM_ROTATE_EXPERIMENT_CLEAR
     };
     size_t e;
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_platform_display =
@@ -328,6 +330,8 @@ int main(void)
     EGLConfig config;
     EGLContext ctx;
     EGLint count = 0;
+    unsigned char *ordinary;
+    unsigned char *elided;
     size_t i;
 
     if (!get_platform_display) {
@@ -347,19 +351,40 @@ int main(void)
     }
     printf("EGL vendor: %s\n", eglQueryString(dpy, EGL_VENDOR));
 
+    ordinary = malloc((size_t)LW * LH * 4);
+    elided = malloc((size_t)LW * LH * 4);
+    if (!ordinary || !elided) {
+        printf("FAIL: out of memory for load-elision identity controls\n");
+        return 2;
+    }
+
     check_experiment_names();
-    for (e = 0; e < sizeof(experiments) / sizeof(experiments[0]); ++e) {
+    for (i = 0; i < sizeof(rotations) / sizeof(rotations[0]); ++i) {
+        if (run(dpy, config, ctx, rotations[i], KMSDRM_ROTATE_EXPERIMENT_NONE, 0, ordinary) != 0 ||
+            run(dpy, config, ctx, rotations[i], KMSDRM_ROTATE_EXPERIMENT_LOADCLEAR, 0, elided) != 0) {
+            return 2;
+        }
+        if (memcmp(ordinary, elided, (size_t)LW * LH * 4) != 0) {
+            printf("FAIL: rotation %d: load elision changes panel bytes\n", rotations[i]);
+            ++failures;
+        } else {
+            printf("ok: rotation %d: legacy and load-elided panel bytes are identical\n", rotations[i]);
+        }
+    }
+    for (e = 0; e < sizeof(diagnostic_experiments) / sizeof(diagnostic_experiments[0]); ++e) {
         for (i = 0; i < sizeof(rotations) / sizeof(rotations[0]); ++i) {
-            if (run(dpy, config, ctx, rotations[i], experiments[e], 0) != 0) {
+            if (run(dpy, config, ctx, rotations[i], diagnostic_experiments[e], 0, NULL) != 0) {
                 return 2;
             }
         }
     }
     for (i = 0; i < sizeof(rotations) / sizeof(rotations[0]); ++i) {
-        if (run(dpy, config, ctx, rotations[i], KMSDRM_ROTATE_EXPERIMENT_NONE, 1) != 0) {
+        if (run(dpy, config, ctx, rotations[i], KMSDRM_ROTATE_EXPERIMENT_NONE, 1, NULL) != 0) {
             return 2;
         }
     }
+    free(elided);
+    free(ordinary);
     eglDestroyContext(dpy, ctx);
     eglTerminate(dpy);
     printf("RESULT: %s\n", failures ? "FAIL" : "PASS");

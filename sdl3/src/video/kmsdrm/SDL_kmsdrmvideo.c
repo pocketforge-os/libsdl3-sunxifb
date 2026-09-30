@@ -1958,8 +1958,8 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
      */
     KMSDRM_GetModeToSet(window, &dispdata->mode);
 
-    /* The opt-in GLES2 SDL_Renderer path draws directly into the panel-native
-       surface. Otherwise the application surface stays logical and the
+    /* The GLES2 SDL_Renderer pre-rotation path draws directly into the
+       panel-native surface. Otherwise the application surface stays logical and the
        ordinary rotated-present path makes a second panel-native surface. */
     if (renderer_prerotation) {
         surface_w = dispdata->mode.hdisplay;
@@ -2408,7 +2408,7 @@ bool KMSDRM_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_Propert
         // PocketForge: GL windows on a sideways panel are presented rotated.
         windata->rotation = dispdata->present_rotation;
         windata->renderer_prerotation_requested =
-            windata->rotation != 0 && SDL_GetHintBoolean(SDL_HINT_KMSDRM_RENDERER_PREROTATION, false);
+            windata->rotation != 0 && SDL_GetHintBoolean(SDL_HINT_KMSDRM_RENDERER_PREROTATION, true);
 
         /* Create the window surfaces with the size we have just chosen.
            Needs the window driverdata in place. */

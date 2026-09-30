@@ -22,9 +22,15 @@
  *                      entry point, and nothing left alive or locked
  *   EXPECT_EXPERIMENT  tsp-mc9m.41.924.16.13.3: the SDL_KMSDRM_ROTATE_EXPERIMENT
  *                      pass run.sh selected (sample0, clear, loadclear or
- *                      twiddle); unset or empty: the ordinary pass, which must
- *                      not touch the experiments' entry points at all (also
- *                      for an unknown experiment name, which SDL ignores)
+ *                      twiddle); unset or empty selects no explicit experiment,
+ *                      so the load-elision policy below applies (also for an
+ *                      unknown experiment name, which SDL ignores)
+ *   EXPECT_LOAD_ELISION 1: an ordinary legacy rotate pass clears its complete
+ *                      target before the overwrite; 0: the explicit opt-out
+ *                      restores the former draw-only call sequence
+ *   EXPECT_LOAD_ELISION_UNAVAILABLE 1: the default attempted load elision but
+ *                      its optional GL table was incomplete, so it safely used
+ *                      the former draw-only sequence
  *   EXPECT_SOURCE_RGB565 1: the rotated application's logical GBM/EGL surface
  *                      is RGB565 while the panel target remains ARGB8888
  *   EXPECT_FORMAT_FAIL 1: RGB565 was explicitly requested while the fake GBM
@@ -129,12 +135,15 @@ int main(void)
     const int expect_makecurrent_fail = env_int("EXPECT_MAKECURRENT_FAIL", 0);
     const int expect_format_fail = env_int("EXPECT_FORMAT_FAIL", 0);
     const int expect_source_rgb565 = env_int("EXPECT_SOURCE_RGB565", 0);
+    const int expect_load_elision = env_int("EXPECT_LOAD_ELISION", 0);
+    const int expect_load_elision_unavailable = env_int("EXPECT_LOAD_ELISION_UNAVAILABLE", 0);
     const char *experiment = getenv("EXPECT_EXPERIMENT") ? getenv("EXPECT_EXPERIMENT") : "";
     const int exp_sample0 = strcmp(experiment, "sample0") == 0;
     const int exp_clear = strcmp(experiment, "clear") == 0;
     const int exp_loadclear = strcmp(experiment, "loadclear") == 0;
     const int exp_twiddle = strcmp(experiment, "twiddle") == 0;
     const int exp_any = exp_sample0 || exp_clear || exp_loadclear || exp_twiddle;
+    const int effective_load_elision = exp_loadclear || (!exp_any && expect_load_elision);
     const int expect_app_rotation = (expect_panel_prop - expect_rotation + 360) % 360;
     const int swaps_axes = expect_rotation == 90 || expect_rotation == 270;
     const int lw = swaps_axes ? FAKE_KMS_PANEL_H : FAKE_KMS_PANEL_W;
@@ -498,12 +507,14 @@ int main(void)
         } else {
             CHECK(report->copies == 0, "no copy of the frame is made (%d)", report->copies);
         }
-        if (exp_loadclear) {
+        if (effective_load_elision) {
             CHECK(report->surfaces[present].clears >= report->draws,
-                  "loadclear experiment: the present surface is cleared before every pass (%d clears, %d passes)",
+                  "%s: the present surface is cleared before every pass (%d clears, %d passes)",
+                  exp_loadclear ? "loadclear experiment" : "default load elision",
                   report->surfaces[present].clears, report->draws);
         } else {
-            CHECK(report->surfaces[present].clears == 0, "the rotate pass does not clear the present surface (%d)",
+            CHECK(report->surfaces[present].clears == 0,
+                  "the legacy/opt-out rotate pass does not clear the present surface (%d)",
                   report->surfaces[present].clears);
         }
         CHECK(draw->pos[0] == -1.0f && draw->pos[1] == 1.0f && draw->pos[6] == 1.0f && draw->pos[7] == -1.0f,
@@ -523,9 +534,9 @@ int main(void)
         CHECK(report->images_created == 0, "negative control: no EGLImages (%d)", report->images_created);
         CHECK(report->draws == 0, "negative control: no rotate pass (%d)", report->draws);
     }
-    if (exp_any && expect_rotation != 0) {
+    if ((exp_any || expect_load_elision || expect_load_elision_unavailable) && expect_rotation != 0) {
         CHECK(report->experiment_proc_requests > 0, "the %s experiment resolved its entry points (%d lookups)",
-              experiment, report->experiment_proc_requests);
+              exp_any ? experiment : "default load-elision", report->experiment_proc_requests);
     } else {
         CHECK(report->experiment_proc_requests == 0,
               "no experiment: the experiments' entry points are never looked up (%d lookups)",
