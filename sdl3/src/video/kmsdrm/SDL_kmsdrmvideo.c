@@ -1857,12 +1857,17 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
     SDL_WindowData *windata = window->internal;
     SDL_VideoDisplay *display = SDL_GetVideoDisplayForWindow(window);
     SDL_DisplayData *dispdata = display->internal;
+    const char *source_format = SDL_GetHint(SDL_HINT_KMSDRM_ROTATE_SOURCE_FORMAT);
 
     uint32_t surface_fmt = GBM_FORMAT_ARGB8888;
     uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
+    bool source_rgb565 = false;
     int surface_w, surface_h;
+    int requested_red = 0, requested_green = 0, requested_blue = 0;
+    int requested_alpha = 0, requested_buffer = 0;
 
     EGLContext egl_context;
+    EGLint egl_visual_id = 0;
 
     bool result = true;
 
@@ -1871,10 +1876,60 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
         KMSDRM_DestroySurfaces(_this, window);
     }
 
+    /* A rotated window's logical surface is sampled rather than scanned out,
+       so RGB565 can halve the pass's source bytes without an intermediate
+       conversion. Keep this opt-in until its colour/banding and performance
+       gates have been checked on the device. */
+    if (windata->rotation != 0 && source_format && *source_format) {
+        if (SDL_strcmp(source_format, "rgb565") == 0) {
+            surface_fmt = GBM_FORMAT_RGB565;
+            surface_flags = GBM_BO_USE_RENDERING;
+            source_rgb565 = true;
+        } else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO,
+                        "KMSDRM rotated present: ignoring unknown SDL_KMSDRM_ROTATE_SOURCE_FORMAT '%s'",
+                        source_format);
+        }
+    }
+
     if (!KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,
                                                surface_fmt, surface_flags)) {
+        if (source_rgb565) {
+            return SDL_SetError("KMSDRM rotated present: RGB565 source format is not supported by GBM");
+        }
         SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO,
                     "GBM surface format not supported. Trying anyway.");
+    }
+
+    /* SDL's normal defaults request 8-bit colour channels. Temporarily ask
+       for the exact 565 colour layout and prove that EGL selected the required
+       native visual before allocating a GBM surface. The chosen EGLConfig is
+       retained for the application's context after these request fields are
+       restored. */
+    if (source_rgb565) {
+        requested_red = _this->gl_config.red_size;
+        requested_green = _this->gl_config.green_size;
+        requested_blue = _this->gl_config.blue_size;
+        requested_alpha = _this->gl_config.alpha_size;
+        requested_buffer = _this->gl_config.buffer_size;
+        _this->gl_config.red_size = 5;
+        _this->gl_config.green_size = 6;
+        _this->gl_config.blue_size = 5;
+        _this->gl_config.alpha_size = 0;
+        _this->gl_config.buffer_size = 16;
+        SDL_EGL_SetRequiredVisualId(_this, surface_fmt);
+        if (!SDL_EGL_ChooseConfig(_this) ||
+            !_this->egl_data->eglGetConfigAttrib(_this->egl_data->egl_display,
+                                                  _this->egl_data->egl_config,
+                                                  EGL_NATIVE_VISUAL_ID, &egl_visual_id) ||
+            (uint32_t)egl_visual_id != surface_fmt) {
+            _this->gl_config.red_size = requested_red;
+            _this->gl_config.green_size = requested_green;
+            _this->gl_config.blue_size = requested_blue;
+            _this->gl_config.alpha_size = requested_alpha;
+            _this->gl_config.buffer_size = requested_buffer;
+            return SDL_SetError("KMSDRM rotated present: no matching RGB565 EGLConfig");
+        }
     }
 
     /* The KMSDRM backend doesn't always set the mode the higher-level code in
@@ -1900,6 +1955,13 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
                                                 surface_fmt, 0);
     }
     if (!windata->gs) {
+        if (source_rgb565) {
+            _this->gl_config.red_size = requested_red;
+            _this->gl_config.green_size = requested_green;
+            _this->gl_config.blue_size = requested_blue;
+            _this->gl_config.alpha_size = requested_alpha;
+            _this->gl_config.buffer_size = requested_buffer;
+        }
         return SDL_SetError("Could not create GBM surface: %s", strerror(errno));
     }
 
@@ -1908,6 +1970,13 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
        and we won't see the first frame. */
     SDL_EGL_SetRequiredVisualId(_this, surface_fmt);
     windata->egl_surface = SDL_EGL_CreateSurface(_this, window, (NativeWindowType)windata->gs);
+    if (source_rgb565) {
+        _this->gl_config.red_size = requested_red;
+        _this->gl_config.green_size = requested_green;
+        _this->gl_config.blue_size = requested_blue;
+        _this->gl_config.alpha_size = requested_alpha;
+        _this->gl_config.buffer_size = requested_buffer;
+    }
 
     if (windata->egl_surface == EGL_NO_SURFACE) {
         result = SDL_SetError("Could not create EGL window surface");
@@ -1919,6 +1988,9 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
                                   dispdata->mode.hdisplay, dispdata->mode.vdisplay)) {
             result = false;
             goto cleanup;
+        }
+        if (source_rgb565) {
+            SDL_Log("KMSDRM rotated present source format: RGB565 (2 bytes/pixel)");
         }
     } else {
         windata->present_gs = windata->gs;

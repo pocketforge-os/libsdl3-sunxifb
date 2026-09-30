@@ -197,8 +197,8 @@ EOF
 # geometry checks as the ARGB scenarios above; the ordinary lsu-fenced case is
 # the in-invocation default-format negative control. A Normal panel has no
 # rotate source, so the opt-in must not change its direct scanout surface. An
-# unsupported explicit request fails before allocation instead of silently
-# benchmarking ARGB8888.
+# unsupported explicit request, or one without a matching EGLConfig, fails
+# before allocation instead of silently benchmarking ARGB8888.
 source_format_witness() {  # case
     local name=$1 lines
     lines=$(grep -cx 'KMSDRM rotated present source format: RGB565 (2 bytes/pixel)' "$WORK/case-$name.log" || true)
