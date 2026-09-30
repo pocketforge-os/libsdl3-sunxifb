@@ -157,6 +157,7 @@ run_case() {
         SDL_KMSDRM_ROTATE_SOURCE_FORMAT="${SDL_KMSDRM_ROTATE_SOURCE_FORMAT:-}" \
         EXPECT_EXPERIMENT="${EXPECT_EXPERIMENT:-}" \
         FAKE_GBM_RGB565="${FAKE_GBM_RGB565:-1}" \
+        FAKE_EGL_RGB565="${FAKE_EGL_RGB565:-1}" \
         FAKE_KMS_PANEL_ORIENTATION="$orientation" FAKE_KMS_ATOMIC="$atomic" \
         FAKE_EGL_NATIVE_FENCE="$native" FAKE_EGL_FENCE_SYNC="$fences" \
         EXPECT_ROTATION="$rotation" EXPECT_PANEL_PROP="$panel" \
@@ -226,7 +227,12 @@ if ! FAKE_GBM_RGB565=0 SDL_KMSDRM_ROTATE_SOURCE_FORMAT=rgb565 EXPECT_FORMAT_FAIL
     failed+=(rgb565-unsupported)
     sed 's/^/    /' "$WORK/case-rgb565-unsupported.log"
 fi
-for name in lsu-fenced rgb565-normal rgb565-unsupported; do
+if ! FAKE_EGL_RGB565=0 SDL_KMSDRM_ROTATE_SOURCE_FORMAT=rgb565 EXPECT_FORMAT_FAIL=2 \
+    run_case rgb565-no-egl-config head "Right Side Up" 1 1 1 "" 270 270; then
+    failed+=(rgb565-no-egl-config)
+    sed 's/^/    /' "$WORK/case-rgb565-no-egl-config.log"
+fi
+for name in lsu-fenced rgb565-normal rgb565-unsupported rgb565-no-egl-config; do
     if grep -q '^KMSDRM rotated present source format: RGB565 ' "$WORK/case-$name.log"; then
         echo "FAIL: $name: RGB565 applied witness on a default, unrotated, or refused path"
         failed+=("$name-rgb565-witness")

@@ -28,8 +28,9 @@
  *   EXPECT_SOURCE_RGB565 1: the rotated application's logical GBM/EGL surface
  *                      is RGB565 while the panel target remains ARGB8888
  *   EXPECT_FORMAT_FAIL 1: RGB565 was explicitly requested while the fake GBM
- *                      device reports it unsupported; window creation must fail
- *                      before allocating a surface and leave nothing alive
+ *                      device reports it unsupported; 2: the matching EGLConfig
+ *                      is absent. Window creation must fail before allocating a
+ *                      surface and leave nothing alive in either case
  *   FAKE_KMS_ATOMIC, FAKE_EGL_FENCE_SYNC, FAKE_EGL_NATIVE_FENCE,
  *   FAKE_KMS_FLIP_MS   (read by the fake too). With FAKE_KMS_FLIP_MS > 0 every
  *                      flip completes that long after its commit, and SDL must
@@ -204,9 +205,14 @@ int main(void)
                               SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
     if (expect_format_fail) {
         printf("SDL_CreateWindow: %s (%s)\n", window ? "created" : "failed", window ? "" : SDL_GetError());
-        CHECK(!window, "unsupported requested RGB565 source fails GL window creation");
-        CHECK(strstr(SDL_GetError(), "RGB565") && strstr(SDL_GetError(), "not supported"),
-              "the failure names unsupported RGB565 (%s)", SDL_GetError());
+        CHECK(!window, "unavailable requested RGB565 source fails GL window creation");
+        if (expect_format_fail == 1) {
+            CHECK(strstr(SDL_GetError(), "RGB565") && strstr(SDL_GetError(), "not supported"),
+                  "the failure names unsupported RGB565 (%s)", SDL_GetError());
+        } else {
+            CHECK(strstr(SDL_GetError(), "RGB565") && strstr(SDL_GetError(), "EGLConfig"),
+                  "the failure names the missing RGB565 EGLConfig (%s)", SDL_GetError());
+        }
         if (window) {
             SDL_DestroyWindow(window);
         }
@@ -215,11 +221,11 @@ int main(void)
             locked += report->surfaces[i].locked_now;
         }
         CHECK(report->surfaces_created == 0 && alive == 0 && locked == 0,
-              "unsupported RGB565 is refused before a GBM surface is allocated (%d created, %d alive, %d locked)",
+              "unavailable RGB565 is refused before a GBM surface is allocated (%d created, %d alive, %d locked)",
               report->surfaces_created, alive, locked);
         CHECK(report->egl_surfaces_alive == 0 && report->contexts_alive == 0 && report->images_alive == 0 &&
                   report->syncs_alive == 0,
-              "unsupported RGB565 leaves no EGL surface (%d), context (%d), image (%d), or sync (%d) alive",
+              "unavailable RGB565 leaves no EGL surface (%d), context (%d), image (%d), or sync (%d) alive",
               report->egl_surfaces_alive, report->contexts_alive, report->images_alive, report->syncs_alive);
         CHECK(report->errors == 0, "the fake display stack saw %d contract violations%s%s", report->errors,
               report->errors ? "; first: " : "", report->first_error);

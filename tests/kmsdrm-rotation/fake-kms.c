@@ -19,6 +19,7 @@
  *   FAKE_EGL_NATIVE_FENCE       1 | 0   EGL_ANDROID_native_fence_sync (1)
  *   FAKE_EGL_FENCE_SYNC         1 | 0   EGL_KHR_fence_sync + wait_sync (1)
  *   FAKE_GBM_RGB565             1 | 0   RGB565 render-surface support (1)
+ *   FAKE_EGL_RGB565             1 | 0   RGB565 EGLConfig availability (1)
  *   FAKE_EGL_FAIL_MAKECURRENT_SURFACE  N: the first eglMakeCurrent that binds
  *                               a context to an EGL surface made from gbm
  *                               surface N (in creation order) fails
@@ -138,6 +139,7 @@ static int g_atomic = 1;
 static int g_native_fence = 1;
 static int g_fence_sync = 1;
 static int g_gbm_rgb565 = 1;
+static int g_egl_rgb565 = 1;
 static int g_fail_makecurrent_surface = -1;
 static int g_flip_ms = 0;
 static uint64_t g_flip_done_ns;  // CLOCK_MONOTONIC time the last flip completes
@@ -198,6 +200,7 @@ static void fake_init(void)
     g_native_fence = env_flag("FAKE_EGL_NATIVE_FENCE", 1);
     g_fence_sync = env_flag("FAKE_EGL_FENCE_SYNC", 1);
     g_gbm_rgb565 = env_flag("FAKE_GBM_RGB565", 1);
+    g_egl_rgb565 = env_flag("FAKE_EGL_RGB565", 1);
     if (getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE") && *getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE")) {
         g_fail_makecurrent_surface = atoi(getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE"));
     }
@@ -1345,6 +1348,9 @@ FAKE_EXPORT EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list
         const EGLint *a;
         int ok = 1;
 
+        if (cfg->visual == GBM_FORMAT_RGB565 && !g_egl_rgb565) {
+            continue;
+        }
         for (a = attrib_list; a && a[0] != EGL_NONE && ok; a += 2) {
             const EGLint want = a[1];
             switch (a[0]) {
