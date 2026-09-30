@@ -70,6 +70,8 @@ static char kmsdrm_dri_devname[8];
 static int kmsdrm_dri_devnamesize = 0;
 static char kmsdrm_dri_cardpath[32];
 
+static void KMSDRM_GetWindowSizeInPixels(SDL_VideoDevice *_this, SDL_Window *window, int *w, int *h);
+
 /* for older KMSDRM headers... */
 #ifndef DRM_FORMAT_MOD_VENDOR_NONE
 #define DRM_FORMAT_MOD_VENDOR_NONE 0
@@ -732,6 +734,7 @@ static SDL_VideoDevice *KMSDRM_CreateDevice(void)
     device->SetWindowTitle = KMSDRM_SetWindowTitle;
     device->SetWindowPosition = KMSDRM_SetWindowPosition;
     device->SetWindowSize = KMSDRM_SetWindowSize;
+    device->GetWindowSizeInPixels = KMSDRM_GetWindowSizeInPixels;
     device->SetWindowFullscreen = KMSDRM_SetWindowFullscreen;
     device->ShowWindow = KMSDRM_ShowWindow;
     device->HideWindow = KMSDRM_HideWindow;
@@ -1811,6 +1814,8 @@ static void KMSDRM_DestroySurfaces(SDL_VideoDevice *_this, SDL_Window *window)
         KMSDRM_gbm_surface_destroy(windata->gs);
         windata->gs = NULL;
     }
+    windata->drawable_w = 0;
+    windata->drawable_h = 0;
 }
 
 static void KMSDRM_GetModeToSet(SDL_Window *window, drmModeModeInfo *out_mode)
@@ -1833,7 +1838,6 @@ static void KMSDRM_GetModeToSet(SDL_Window *window, drmModeModeInfo *out_mode)
 static void KMSDRM_DirtySurfaces(SDL_Window *window)
 {
     SDL_WindowData *windata = window->internal;
-    SDL_PropertiesID props = SDL_GetWindowProperties(window);
     drmModeModeInfo mode;
 
     /* Can't recreate EGL surfaces right now, need to wait until SwapWindow
@@ -1847,10 +1851,6 @@ static void KMSDRM_DirtySurfaces(SDL_Window *window)
     {
         int w, h;
         KMSDRM_RotationLogicalSize(windata->rotation, mode.hdisplay, mode.vdisplay, &w, &h);
-        if (windata->renderer_prerotation_requested && !windata->renderer_prerotation_disabled) {
-            SDL_SetNumberProperty(props, KMSDRM_PREROTATION_LOGICAL_WIDTH_PROPERTY, w);
-            SDL_SetNumberProperty(props, KMSDRM_PREROTATION_LOGICAL_HEIGHT_PROPERTY, h);
-        }
         SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESIZED, w, h);
     }
 }
@@ -1871,7 +1871,6 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
     const bool renderer_prerotation = windata->rotation != 0 &&
                                       windata->renderer_prerotation_requested &&
                                       !windata->renderer_prerotation_disabled;
-    SDL_PropertiesID window_props = SDL_GetWindowProperties(window);
     int prerotation_logical_w = 0, prerotation_logical_h = 0;
     int surface_w, surface_h;
     int requested_red = 0, requested_green = 0, requested_blue = 0;
@@ -1882,17 +1881,12 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
 
     bool result = true;
 
-    /* Save the SDL-facing dimensions before the panel-native surface resize
-       below changes window->w/h synchronously. A prior dirty-surface event
-       may already have supplied the next logical dimensions. */
+    /* The public window remains logical even though this candidate's GBM/EGL
+       drawable is panel-native. Capture the logical size before rebuilding so
+       the resize notification below can keep all SDL window fields in that
+       coordinate space. */
     if (renderer_prerotation) {
-        prerotation_logical_w = (int)SDL_GetNumberProperty(
-            window_props, KMSDRM_PREROTATION_LOGICAL_WIDTH_PROPERTY, 0);
-        prerotation_logical_h = (int)SDL_GetNumberProperty(
-            window_props, KMSDRM_PREROTATION_LOGICAL_HEIGHT_PROPERTY, 0);
-        if (prerotation_logical_w <= 0 || prerotation_logical_h <= 0) {
-            SDL_GetWindowSize(window, &prerotation_logical_w, &prerotation_logical_h);
-        }
+        SDL_GetWindowSize(window, &prerotation_logical_w, &prerotation_logical_h);
     }
 
     // If the current window already has surfaces, destroy them before creating other.
@@ -2026,11 +2020,8 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
         windata->present_gs = windata->gs;
         windata->present_egl_surface = windata->egl_surface;
         if (renderer_prerotation) {
-            SDL_SetNumberProperty(window_props, KMSDRM_PREROTATION_WINDOW_PROPERTY, windata->rotation);
-            SDL_SetNumberProperty(window_props, KMSDRM_PREROTATION_LOGICAL_WIDTH_PROPERTY,
-                                  prerotation_logical_w);
-            SDL_SetNumberProperty(window_props, KMSDRM_PREROTATION_LOGICAL_HEIGHT_PROPERTY,
-                                  prerotation_logical_h);
+            SDL_SetNumberProperty(SDL_GetWindowProperties(window),
+                                  KMSDRM_PREROTATION_WINDOW_PROPERTY, windata->rotation);
             SDL_Log("KMSDRM SDL_Renderer pre-rotation candidate: rotation=%d surface=%dx%d",
                     windata->rotation, surface_w, surface_h);
         }
@@ -2041,7 +2032,16 @@ bool KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
     egl_context = (EGLContext)SDL_GL_GetCurrentContext();
     result = SDL_EGL_MakeCurrent(_this, windata->egl_surface, egl_context);
 
-    SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESIZED, surface_w, surface_h);
+    if (result) {
+        windata->drawable_w = surface_w;
+        windata->drawable_h = surface_h;
+        if (renderer_prerotation) {
+            SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESIZED,
+                                prerotation_logical_w, prerotation_logical_h);
+        } else {
+            SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESIZED, surface_w, surface_h);
+        }
+    }
 
     windata->egl_surface_dirty = false;
 
@@ -2067,6 +2067,8 @@ cleanup:
             KMSDRM_gbm_surface_destroy(windata->gs);
             windata->gs = NULL;
         }
+        windata->drawable_w = 0;
+        windata->drawable_h = 0;
     }
 
     return result;
@@ -2477,6 +2479,20 @@ void KMSDRM_SetWindowSize(SDL_VideoDevice *_this, SDL_Window *window)
     SDL_VideoData *viddata = _this->internal;
     if (!viddata->vulkan_mode) {
         KMSDRM_DirtySurfaces(window);
+    }
+}
+
+static void KMSDRM_GetWindowSizeInPixels(SDL_VideoDevice *_this, SDL_Window *window, int *w, int *h)
+{
+    SDL_WindowData *windata = window->internal;
+
+    (void)_this;
+    if (windata && windata->drawable_w > 0 && windata->drawable_h > 0) {
+        *w = windata->drawable_w;
+        *h = windata->drawable_h;
+    } else {
+        *w = window->w;
+        *h = window->h;
     }
 }
 SDL_FullscreenResult KMSDRM_SetWindowFullscreen(SDL_VideoDevice *_this, SDL_Window *window, SDL_VideoDisplay *display, SDL_FullscreenOp fullscreen)

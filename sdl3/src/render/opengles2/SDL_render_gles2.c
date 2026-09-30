@@ -325,24 +325,34 @@ static void GLES2_WindowEvent(SDL_Renderer *renderer, const SDL_WindowEvent *eve
 #ifdef SDL_VIDEO_DRIVER_KMSDRM
     if (data->kmsdrm_prerotation && event->type == SDL_EVENT_WINDOW_RESIZED &&
         event->data1 > 0 && event->data2 > 0) {
-        int physical_w, physical_h;
-        KMSDRM_PreRotationPhysicalSize(data->kmsdrm_prerotation,
-                                       data->logical_drawablew, data->logical_drawableh,
-                                       &physical_w, &physical_h);
-        /* Surface recreation can publish the EGL drawable's physical size as
-           a resize. Do not let that replace the renderer's logical contract. */
-        if (event->data1 != physical_w || event->data2 != physical_h) {
-            data->logical_drawablew = event->data1;
-            data->logical_drawableh = event->data2;
-            data->drawstate.viewport_dirty = true;
-            data->drawstate.cliprect_dirty = true;
-        }
+        data->logical_drawablew = event->data1;
+        data->logical_drawableh = event->data2;
+        data->drawstate.viewport_dirty = true;
+        data->drawstate.cliprect_dirty = true;
     }
 #endif
     if (event->type == SDL_EVENT_WINDOW_MINIMIZED) {
         // According to Apple documentation, we need to finish drawing NOW!
         data->glFinish();
     }
+}
+
+static bool GLES2_GetOutputSize(SDL_Renderer *renderer, int *w, int *h)
+{
+    GLES2_RenderData *data = (GLES2_RenderData *)renderer->internal;
+
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+    if (data->kmsdrm_prerotation) {
+        if (w) {
+            *w = data->logical_drawablew;
+        }
+        if (h) {
+            *h = data->logical_drawableh;
+        }
+        return true;
+    }
+#endif
+    return SDL_GetWindowSizeInPixels(renderer->window, w, h);
 }
 
 static GLenum GetBlendFunc(SDL_BlendFactor factor)
@@ -1502,9 +1512,8 @@ static bool GLES2_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderCommand *cmd
         int w, h;
         int drawablew, drawableh;
         if (data->kmsdrm_prerotation) {
-            /* The EGL drawable is intentionally panel-native, so pixel-size
-               queries can expose physical dimensions after surface rebuild.
-               WINDOW_RESIZED events above maintain this logical size. */
+            /* The EGL drawable is panel-native, while renderer coordinates
+               and output size remain in the public logical window space. */
             w = data->logical_drawablew;
             h = data->logical_drawableh;
         } else {
@@ -2475,6 +2484,7 @@ static bool GLES2_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL
 
     // Populate the function pointers for the module
     renderer->WindowEvent = GLES2_WindowEvent;
+    renderer->GetOutputSize = GLES2_GetOutputSize;
     renderer->SupportsBlendMode = GLES2_SupportsBlendMode;
     renderer->CreatePalette = GLES2_CreatePalette;
     renderer->UpdatePalette = GLES2_UpdatePalette;
@@ -2598,10 +2608,7 @@ static bool GLES2_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL
 #ifdef SDL_VIDEO_DRIVER_KMSDRM
     data->kmsdrm_prerotation = (int)SDL_GetNumberProperty(SDL_GetWindowProperties(window),
                                                           KMSDRM_PREROTATION_WINDOW_PROPERTY, 0);
-    data->logical_drawablew = (int)SDL_GetNumberProperty(SDL_GetWindowProperties(window),
-                                                         KMSDRM_PREROTATION_LOGICAL_WIDTH_PROPERTY, 0);
-    data->logical_drawableh = (int)SDL_GetNumberProperty(SDL_GetWindowProperties(window),
-                                                         KMSDRM_PREROTATION_LOGICAL_HEIGHT_PROPERTY, 0);
+    SDL_GetWindowSize(window, &data->logical_drawablew, &data->logical_drawableh);
     if (data->kmsdrm_prerotation && KMSDRM_RotationIsValid(data->kmsdrm_prerotation)) {
         if (data->logical_drawablew > 0 && data->logical_drawableh > 0) {
             SDL_SetBooleanProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_ACTIVE_PROPERTY, true);

@@ -197,6 +197,10 @@ struct SDL_WindowData
 
     EGLSurface egl_surface;
     bool egl_surface_dirty;
+    /* Pixel/drawable dimensions of gs. These differ from the public logical
+       window size while SDL_Renderer pre-rotation is a candidate. */
+    int drawable_w;
+    int drawable_h;
 
     /* This dictates what approach we'll use for SwapBuffers. */
     bool (*swap_window)(SDL_VideoDevice *_this, SDL_Window *window);

@@ -78,6 +78,10 @@ typedef struct FakeKmsReport
     int readpixels_calls;
     int readpixels_rect[4];
 
+    /* Hardware-cursor coordinates submitted through drmModeMoveCursor. */
+    int cursor_move_calls;
+    int cursor_x, cursor_y;
+
     /* tsp-mc9m.41.924.16.13.3, SDL_KMSDRM_ROTATE_EXPERIMENT: glCopyTexSubImage2D
        calls (the copy texture then samples as the read framebuffer's image), and
        eglGetProcAddress lookups of the entry points only an experiment uses

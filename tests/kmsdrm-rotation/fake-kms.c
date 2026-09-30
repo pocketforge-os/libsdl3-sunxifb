@@ -139,6 +139,7 @@ static int g_atomic = 1;
 static int g_native_fence = 1;
 static int g_fence_sync = 1;
 static int g_gbm_rgb565 = 1;
+static int g_gbm_cursor = 0;
 static int g_egl_rgb565 = 1;
 static int g_fail_makecurrent_surface = -1;
 static int g_flip_ms = 0;
@@ -200,6 +201,7 @@ static void fake_init(void)
     g_native_fence = env_flag("FAKE_EGL_NATIVE_FENCE", 1);
     g_fence_sync = env_flag("FAKE_EGL_FENCE_SYNC", 1);
     g_gbm_rgb565 = env_flag("FAKE_GBM_RGB565", 1);
+    g_gbm_cursor = env_flag("FAKE_GBM_CURSOR", 0);
     g_egl_rgb565 = env_flag("FAKE_EGL_RGB565", 1);
     if (getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE") && *getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE")) {
         g_fail_makecurrent_surface = atoi(getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE"));
@@ -316,9 +318,10 @@ FAKE_EXPORT void gbm_device_destroy(struct gbm_device *gbm)
 FAKE_EXPORT int gbm_device_is_format_supported(struct gbm_device *gbm, uint32_t format, uint32_t flags)
 {
     (void)gbm;
-    // No cursor support: SDL then skips its cursor buffer entirely.
-    return (format == GBM_FORMAT_ARGB8888 || (format == GBM_FORMAT_RGB565 && g_gbm_rgb565)) &&
-           !(flags & GBM_BO_USE_CURSOR);
+    if (flags & GBM_BO_USE_CURSOR) {
+        return g_gbm_cursor && format == GBM_FORMAT_ARGB8888;
+    }
+    return format == GBM_FORMAT_ARGB8888 || (format == GBM_FORMAT_RGB565 && g_gbm_rgb565);
 }
 
 FAKE_EXPORT struct gbm_bo *gbm_bo_create(struct gbm_device *gbm, uint32_t width, uint32_t height,
@@ -947,7 +950,14 @@ FAKE_EXPORT int drmModeSetCursor2(int fd, uint32_t crtcId, uint32_t bo_handle, u
 
 FAKE_EXPORT int drmModeMoveCursor(int fd, uint32_t crtcId, int x, int y)
 {
-    (void)fd; (void)crtcId; (void)x; (void)y;
+    (void)fd;
+    if (crtcId != OBJ_CRTC) {
+        fake_error("drmModeMoveCursor with unexpected CRTC %u", crtcId);
+        return -EINVAL;
+    }
+    ++g_report.cursor_move_calls;
+    g_report.cursor_x = x;
+    g_report.cursor_y = y;
     return 0;
 }
 

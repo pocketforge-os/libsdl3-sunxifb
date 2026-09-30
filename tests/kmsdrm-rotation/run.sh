@@ -423,7 +423,7 @@ while read -r name orientation rotation enabled; do
     rc=0
     env LD_LIBRARY_PATH="$WORK/fake:$WORK/prefix-head/lib" \
         FAKE_KMS_PANEL_ORIENTATION="${orientation//_/ }" FAKE_KMS_ATOMIC=1 \
-        FAKE_EGL_NATIVE_FENCE=1 FAKE_EGL_FENCE_SYNC=1 \
+        FAKE_EGL_NATIVE_FENCE=1 FAKE_EGL_FENCE_SYNC=1 FAKE_GBM_CURSOR=1 \
         EXPECT_ROTATION=$rotation EXPECT_PREROTATE=$enabled \
         "$WORK/test-kmsdrm-prerotate" >"$log" 2>&1 || rc=$?
     printf '%-28s rc=%d  %s\n' "$name" "$rc" "$(grep -E '^RESULT:' "$log" || echo 'RESULT: none')"

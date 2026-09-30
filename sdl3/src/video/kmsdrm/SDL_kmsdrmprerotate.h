@@ -21,8 +21,6 @@
 
 #define KMSDRM_PREROTATION_WINDOW_PROPERTY "SDL.window.KMSDRM.pocketforge.renderer_prerotation"
 #define KMSDRM_PREROTATION_ACTIVE_PROPERTY "SDL.window.KMSDRM.pocketforge.renderer_prerotation_active"
-#define KMSDRM_PREROTATION_LOGICAL_WIDTH_PROPERTY "SDL.window.KMSDRM.pocketforge.renderer_prerotation_logical_width"
-#define KMSDRM_PREROTATION_LOGICAL_HEIGHT_PROPERTY "SDL.window.KMSDRM.pocketforge.renderer_prerotation_logical_height"
 #define KMSDRM_PRESENT_ROTATION_WINDOW_PROPERTY "SDL.window.KMSDRM.pocketforge.present_rotation"
 
 typedef struct KMSDRM_PreRotationRect
