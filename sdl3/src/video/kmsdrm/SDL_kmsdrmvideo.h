@@ -75,6 +75,10 @@
 #define GBM_BO_USE_LINEAR   (1 << 4)
 #endif
 
+#ifndef GBM_FORMAT_RGB565
+#define GBM_FORMAT_RGB565 ((uint32_t)('R') | ((uint32_t)('G') << 8) | ((uint32_t)('1') << 16) | ((uint32_t)('6') << 24))
+#endif
+
 typedef struct KMSDRM_plane
 {
     drmModePlane *plane;

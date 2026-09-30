@@ -18,6 +18,8 @@
  *   FAKE_KMS_ATOMIC             1 | 0   atomic modesetting   (default 1)
  *   FAKE_EGL_NATIVE_FENCE       1 | 0   EGL_ANDROID_native_fence_sync (1)
  *   FAKE_EGL_FENCE_SYNC         1 | 0   EGL_KHR_fence_sync + wait_sync (1)
+ *   FAKE_GBM_RGB565             1 | 0   RGB565 render-surface support (1)
+ *   FAKE_EGL_RGB565             1 | 0   RGB565 EGLConfig availability (1)
  *   FAKE_EGL_FAIL_MAKECURRENT_SURFACE  N: the first eglMakeCurrent that binds
  *                               a context to an EGL surface made from gbm
  *                               surface N (in creation order) fails
@@ -136,6 +138,8 @@ static int g_has_orientation = 1;
 static int g_atomic = 1;
 static int g_native_fence = 1;
 static int g_fence_sync = 1;
+static int g_gbm_rgb565 = 1;
+static int g_egl_rgb565 = 1;
 static int g_fail_makecurrent_surface = -1;
 static int g_flip_ms = 0;
 static uint64_t g_flip_done_ns;  // CLOCK_MONOTONIC time the last flip completes
@@ -195,6 +199,8 @@ static void fake_init(void)
     g_atomic = env_flag("FAKE_KMS_ATOMIC", 1);
     g_native_fence = env_flag("FAKE_EGL_NATIVE_FENCE", 1);
     g_fence_sync = env_flag("FAKE_EGL_FENCE_SYNC", 1);
+    g_gbm_rgb565 = env_flag("FAKE_GBM_RGB565", 1);
+    g_egl_rgb565 = env_flag("FAKE_EGL_RGB565", 1);
     if (getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE") && *getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE")) {
         g_fail_makecurrent_surface = atoi(getenv("FAKE_EGL_FAIL_MAKECURRENT_SURFACE"));
     }
@@ -275,6 +281,7 @@ static void report_surface(const struct gbm_surface *gs)
     }
     r->w = (int)gs->w;
     r->h = (int)gs->h;
+    r->format = gs->format;
     r->flags = gs->flags;
     r->alive = gs->alive;
     r->locked_now = locked;
@@ -310,7 +317,8 @@ FAKE_EXPORT int gbm_device_is_format_supported(struct gbm_device *gbm, uint32_t 
 {
     (void)gbm;
     // No cursor support: SDL then skips its cursor buffer entirely.
-    return format == GBM_FORMAT_ARGB8888 && !(flags & GBM_BO_USE_CURSOR);
+    return (format == GBM_FORMAT_ARGB8888 || (format == GBM_FORMAT_RGB565 && g_gbm_rgb565)) &&
+           !(flags & GBM_BO_USE_CURSOR);
 }
 
 FAKE_EXPORT struct gbm_bo *gbm_bo_create(struct gbm_device *gbm, uint32_t width, uint32_t height,
@@ -339,13 +347,13 @@ FAKE_EXPORT void gbm_bo_destroy(struct gbm_bo *bo)
 
 FAKE_EXPORT uint32_t gbm_bo_get_width(struct gbm_bo *bo) { return bo->w; }
 FAKE_EXPORT uint32_t gbm_bo_get_height(struct gbm_bo *bo) { return bo->h; }
-FAKE_EXPORT uint32_t gbm_bo_get_stride(struct gbm_bo *bo) { return bo->w * 4; }
+FAKE_EXPORT uint32_t gbm_bo_get_stride(struct gbm_bo *bo) { return bo->w * (bo->format == GBM_FORMAT_RGB565 ? 2 : 4); }
 FAKE_EXPORT uint32_t gbm_bo_get_format(struct gbm_bo *bo) { return bo->format; }
 FAKE_EXPORT struct gbm_device *gbm_bo_get_device(struct gbm_bo *bo) { return bo->dev; }
 FAKE_EXPORT uint64_t gbm_bo_get_modifier(struct gbm_bo *bo) { (void)bo; return 0; /* DRM_FORMAT_MOD_LINEAR */ }
 FAKE_EXPORT int gbm_bo_get_plane_count(struct gbm_bo *bo) { (void)bo; return 1; }
 FAKE_EXPORT uint32_t gbm_bo_get_offset(struct gbm_bo *bo, int plane) { (void)bo; (void)plane; return 0; }
-FAKE_EXPORT uint32_t gbm_bo_get_stride_for_plane(struct gbm_bo *bo, int plane) { (void)plane; return bo->w * 4; }
+FAKE_EXPORT uint32_t gbm_bo_get_stride_for_plane(struct gbm_bo *bo, int plane) { (void)plane; return gbm_bo_get_stride(bo); }
 
 FAKE_EXPORT union gbm_bo_handle gbm_bo_get_handle(struct gbm_bo *bo)
 {
@@ -387,6 +395,10 @@ FAKE_EXPORT struct gbm_surface *gbm_surface_create(struct gbm_device *gbm, uint3
     int i;
 
     fake_init();
+    if (!gbm_device_is_format_supported(gbm, format, flags)) {
+        errno = EINVAL;
+        return NULL;
+    }
     if (g_report.surfaces_created >= FAKE_KMS_MAX_SURFACES) {
         fake_error("too many gbm surfaces");
         errno = ENOMEM;
@@ -1189,6 +1201,8 @@ static const FakeConfig g_configs[] = {
     { 2, GBM_FORMAT_XRGB8888, 8, 8, 8, 0, 0, 0, EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT_KHR, EGL_WINDOW_BIT },
     { 3, GBM_FORMAT_ARGB8888, 8, 8, 8, 8, 24, 8, EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT_KHR, EGL_WINDOW_BIT },
     { 4, GBM_FORMAT_XRGB8888, 8, 8, 8, 0, 24, 8, EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT_KHR, EGL_WINDOW_BIT },
+    { 5, GBM_FORMAT_RGB565,   5, 6, 5, 0, 0,  0, EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT_KHR, EGL_WINDOW_BIT },
+    { 6, GBM_FORMAT_RGB565,   5, 6, 5, 0, 24, 8, EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT_KHR, EGL_WINDOW_BIT },
 };
 
 typedef struct FakeImage
@@ -1334,6 +1348,9 @@ FAKE_EXPORT EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list
         const EGLint *a;
         int ok = 1;
 
+        if (cfg->visual == GBM_FORMAT_RGB565 && !g_egl_rgb565) {
+            continue;
+        }
         for (a = attrib_list; a && a[0] != EGL_NONE && ok; a += 2) {
             const EGLint want = a[1];
             switch (a[0]) {

@@ -65,6 +65,26 @@ static uint32_t code_of(int lx, int ly)
     return (uint32_t)(ly * LW + lx) + 1u; // never 0 (black) or the magenta clear
 }
 
+static uint16_t rgb565_of(int lx, int ly)
+{
+    const unsigned r = (unsigned)lx * 31u / (LW - 1);
+    const unsigned g = (unsigned)ly * 63u / (LH - 1);
+    const unsigned b = ((unsigned)lx / 17u + (unsigned)ly / 11u) & 31u;
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+static int rgb565_matches(uint16_t value, const unsigned char *rgba)
+{
+    const unsigned r = (value >> 11) & 31u;
+    const unsigned g = (value >> 5) & 63u;
+    const unsigned b = value & 31u;
+    const unsigned er = (r << 3) | (r >> 2);
+    const unsigned eg = (g << 2) | (g >> 4);
+    const unsigned eb = (b << 3) | (b >> 2);
+    return abs((int)rgba[0] - (int)er) <= 1 && abs((int)rgba[1] - (int)eg) <= 1 &&
+           abs((int)rgba[2] - (int)eb) <= 1;
+}
+
 /* sample0: the 0-degree quad over the panel. Pixel (x, y) is centred at
    ((x + 0.5) / pw, (y + 0.5) / ph) and NEAREST picks the texel under it. The
    interpolated coordinate can land exactly on a texel edge, so allow one texel
@@ -86,9 +106,11 @@ static int sample0_matches(int pw, int ph, int x, int y, uint32_t got)
     return 0;
 }
 
-static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation, KMSDRM_RotateExperiment experiment)
+static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation,
+               KMSDRM_RotateExperiment experiment, int rgb565)
 {
     const char *name = KMSDRM_RotateGL_ExperimentName(experiment);
+    const char *source_name = rgb565 ? "rgb565" : "rgba8888";
     KMSDRM_RotateGLExp exp = { 0 };
     GLuint draw_texture, copy_texture = 0, read_fbo = 0;
     const int swaps = rotation == 90 || rotation == 270;
@@ -120,7 +142,7 @@ static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation, K
         return 1;
     }
 
-    src = malloc((size_t)LW * LH * 4);
+    src = malloc((size_t)LW * LH * (rgb565 ? 2 : 4));
     out = malloc((size_t)pw * ph * 4);
     if (!src || !out) {
         printf("FAIL: out of memory\n");
@@ -129,18 +151,26 @@ static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation, K
     // Memory row 0 is the landscape image's top row, as in an application's GBM buffer.
     for (y = 0; y < LH; ++y) {
         for (x = 0; x < LW; ++x) {
-            const uint32_t code = code_of(x, y);
-            unsigned char *p = &src[((size_t)y * LW + x) * 4];
-            p[0] = (unsigned char)(code & 0xff);
-            p[1] = (unsigned char)((code >> 8) & 0xff);
-            p[2] = (unsigned char)((code >> 16) & 0xff);
-            p[3] = 0xff;
+            if (rgb565) {
+                ((uint16_t *)src)[(size_t)y * LW + x] = rgb565_of(x, y);
+            } else {
+                const uint32_t code = code_of(x, y);
+                unsigned char *p = &src[((size_t)y * LW + x) * 4];
+                p[0] = (unsigned char)(code & 0xff);
+                p[1] = (unsigned char)((code >> 8) & 0xff);
+                p[2] = (unsigned char)((code >> 16) & 0xff);
+                p[3] = 0xff;
+            }
         }
     }
     gl.GenTextures(1, &texture);
     gl.BindTexture(GL_TEXTURE_2D, texture);
     PixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, LW, LH, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
+    if (rgb565) {
+        TexImage2D(GL_TEXTURE_2D, 0, GL_RGB, LW, LH, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, src);
+    } else {
+        TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, LW, LH, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
+    }
 
     ClearColor(1.0f, 0.0f, 1.0f, 1.0f);
     Clear(GL_COLOR_BUFFER_BIT);
@@ -182,7 +212,9 @@ static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation, K
             const uint32_t got = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
             int lx, ly, match;
             expected_source(rotation, x, y, &lx, &ly);
-            switch (experiment) {
+            if (rgb565) {
+                match = rgb565_matches(rgb565_of(lx, ly), p);
+            } else switch (experiment) {
             case KMSDRM_ROTATE_EXPERIMENT_CLEAR:
                 match = p[0] == 0x20 && p[1] == 0x20 && p[2] == 0x20;
                 break;
@@ -195,20 +227,22 @@ static int run(EGLDisplay dpy, EGLConfig config, EGLContext ctx, int rotation, K
             }
             if (!match || p[3] != 0xff) {
                 if (mismatches < 5) {
-                    printf("  rotation %d (%s): panel (%d,%d) shows code %u (rgba %u,%u,%u,%u); ordinary pass: landscape (%d,%d) code %u\n",
-                           rotation, name, x, y, got, p[0], p[1], p[2], p[3], lx, ly, code_of(lx, ly));
+                    printf("  rotation %d (%s, %s): panel (%d,%d) shows code %u (rgba %u,%u,%u,%u); "
+                           "ordinary pass: landscape (%d,%d) code %u rgb565 0x%04x\n",
+                           rotation, name, source_name, x, y, got, p[0], p[1], p[2], p[3], lx, ly,
+                           code_of(lx, ly), rgb565_of(lx, ly));
                 }
                 ++mismatches;
             }
-            if (got == code_of(0, 0)) {
+            if (!rgb565 && got == code_of(0, 0)) {
                 tl_x = x;
                 tl_y = y;
             }
         }
     }
-    printf("%s: rotation %d (%s): %dx%d landscape -> %dx%d panel, %d of %d pixels mismatched; "
+    printf("%s: rotation %d (%s, %s): %dx%d landscape -> %dx%d panel, %d of %d pixels mismatched; "
            "landscape top-left is at panel (%d,%d)\n",
-           mismatches ? "FAIL" : "ok", rotation, name, LW, LH, pw, ph, mismatches, pw * ph, tl_x, tl_y);
+           mismatches ? "FAIL" : "ok", rotation, name, source_name, LW, LH, pw, ph, mismatches, pw * ph, tl_x, tl_y);
     if (mismatches) {
         ++failures;
     }
@@ -316,9 +350,14 @@ int main(void)
     check_experiment_names();
     for (e = 0; e < sizeof(experiments) / sizeof(experiments[0]); ++e) {
         for (i = 0; i < sizeof(rotations) / sizeof(rotations[0]); ++i) {
-            if (run(dpy, config, ctx, rotations[i], experiments[e]) != 0) {
+            if (run(dpy, config, ctx, rotations[i], experiments[e], 0) != 0) {
                 return 2;
             }
+        }
+    }
+    for (i = 0; i < sizeof(rotations) / sizeof(rotations[0]); ++i) {
+        if (run(dpy, config, ctx, rotations[i], KMSDRM_ROTATE_EXPERIMENT_NONE, 1) != 0) {
+            return 2;
         }
     }
     eglDestroyContext(dpy, ctx);

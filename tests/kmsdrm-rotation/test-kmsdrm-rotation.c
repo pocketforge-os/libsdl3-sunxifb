@@ -25,6 +25,12 @@
  *                      twiddle); unset or empty: the ordinary pass, which must
  *                      not touch the experiments' entry points at all (also
  *                      for an unknown experiment name, which SDL ignores)
+ *   EXPECT_SOURCE_RGB565 1: the rotated application's logical GBM/EGL surface
+ *                      is RGB565 while the panel target remains ARGB8888
+ *   EXPECT_FORMAT_FAIL 1: RGB565 was explicitly requested while the fake GBM
+ *                      device reports it unsupported; 2: the matching EGLConfig
+ *                      is absent. Window creation must fail before allocating a
+ *                      surface and leave nothing alive in either case
  *   FAKE_KMS_ATOMIC, FAKE_EGL_FENCE_SYNC, FAKE_EGL_NATIVE_FENCE,
  *   FAKE_KMS_FLIP_MS   (read by the fake too). With FAKE_KMS_FLIP_MS > 0 every
  *                      flip completes that long after its commit, and SDL must
@@ -113,6 +119,8 @@ int main(void)
     const int expect_window_fail = env_int("EXPECT_WINDOW_FAIL", 0);
     const int expect_vulkan_window = env_int("EXPECT_VULKAN_WINDOW", 0);
     const int expect_makecurrent_fail = env_int("EXPECT_MAKECURRENT_FAIL", 0);
+    const int expect_format_fail = env_int("EXPECT_FORMAT_FAIL", 0);
+    const int expect_source_rgb565 = env_int("EXPECT_SOURCE_RGB565", 0);
     const char *experiment = getenv("EXPECT_EXPERIMENT") ? getenv("EXPECT_EXPERIMENT") : "";
     const int exp_sample0 = strcmp(experiment, "sample0") == 0;
     const int exp_clear = strcmp(experiment, "clear") == 0;
@@ -195,6 +203,36 @@ int main(void)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
     window = SDL_CreateWindow("kmsdrm-rotation", desktop ? desktop->w : lw, desktop ? desktop->h : lh,
                               SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
+    if (expect_format_fail) {
+        printf("SDL_CreateWindow: %s (%s)\n", window ? "created" : "failed", window ? "" : SDL_GetError());
+        CHECK(!window, "unavailable requested RGB565 source fails GL window creation");
+        if (expect_format_fail == 1) {
+            CHECK(strstr(SDL_GetError(), "RGB565") && strstr(SDL_GetError(), "not supported"),
+                  "the failure names unsupported RGB565 (%s)", SDL_GetError());
+        } else {
+            CHECK(strstr(SDL_GetError(), "RGB565") && strstr(SDL_GetError(), "EGLConfig"),
+                  "the failure names the missing RGB565 EGLConfig (%s)", SDL_GetError());
+        }
+        if (window) {
+            SDL_DestroyWindow(window);
+        }
+        for (i = 0; i < report->surfaces_created; ++i) {
+            alive += report->surfaces[i].alive;
+            locked += report->surfaces[i].locked_now;
+        }
+        CHECK(report->surfaces_created == 0 && alive == 0 && locked == 0,
+              "unavailable RGB565 is refused before a GBM surface is allocated (%d created, %d alive, %d locked)",
+              report->surfaces_created, alive, locked);
+        CHECK(report->egl_surfaces_alive == 0 && report->contexts_alive == 0 && report->images_alive == 0 &&
+                  report->syncs_alive == 0,
+              "unavailable RGB565 leaves no EGL surface (%d), context (%d), image (%d), or sync (%d) alive",
+              report->egl_surfaces_alive, report->contexts_alive, report->images_alive, report->syncs_alive);
+        CHECK(report->errors == 0, "the fake display stack saw %d contract violations%s%s", report->errors,
+              report->errors ? "; first: " : "", report->first_error);
+        SDL_Quit();
+        printf("RESULT: %s\n", failures ? "FAIL" : "PASS");
+        return failures ? 1 : 0;
+    }
     if (expect_window_fail) {
         printf("SDL_CreateWindow: %s (%s)\n", window ? "created" : "failed", window ? "" : SDL_GetError());
         CHECK(report->omitted_proc_requests >= 1,
@@ -313,6 +351,11 @@ int main(void)
           "the application renders into a %dx%d surface (expected %dx%d)",
           app_surface >= 0 ? report->surfaces[app_surface].w : -1,
           app_surface >= 0 ? report->surfaces[app_surface].h : -1, lw, lh);
+    CHECK(app_surface >= 0 && report->surfaces[app_surface].format ==
+              (expect_source_rgb565 ? GBM_FORMAT_RGB565 : GBM_FORMAT_ARGB8888),
+          "the application surface format is %s (fourcc 0x%08x)",
+          expect_source_rgb565 ? "RGB565" : "ARGB8888",
+          app_surface >= 0 ? report->surfaces[app_surface].format : 0u);
     CHECK(report->scanouts > 0 && report->scanout_w == FAKE_KMS_PANEL_W && report->scanout_h == FAKE_KMS_PANEL_H,
           "the panel scans out a %dx%d buffer (%d scanouts)", report->scanout_w, report->scanout_h, report->scanouts);
     if (atomic && flip_ms > 0) {
@@ -354,8 +397,9 @@ int main(void)
         CHECK(alive == 2, "two GBM surfaces are alive: the application's and the panel-native present surface (%d)", alive);
         CHECK(present >= 0 && present != app_surface && report->surfaces[present].w == FAKE_KMS_PANEL_W &&
                   report->surfaces[present].h == FAKE_KMS_PANEL_H &&
+                  report->surfaces[present].format == GBM_FORMAT_ARGB8888 &&
                   (report->surfaces[present].flags & GBM_BO_USE_SCANOUT),
-              "the scanned-out buffer comes from the 720x1280 scanout surface, not the application's");
+              "the scanned-out buffer comes from the ARGB8888 720x1280 scanout surface, not the application's");
         CHECK(report->contexts_alive == 2, "application context plus one rotate context (%d contexts)", report->contexts_alive);
         CHECK(report->draws >= frames - 2, "%d rotate passes for %d frames", report->draws, frames);
         CHECK(draw->ctx != (void *)context, "the rotate pass ran in its own context, not the application's");
@@ -408,6 +452,7 @@ int main(void)
                   report->cross_context_waits, report->draws);
         }
     } else {
+        CHECK(!expect_source_rgb565, "negative control: RGB565 is not applied without a rotate pass");
         CHECK(alive == 1, "negative control: one GBM surface is alive (%d)", alive);
         CHECK(report->scanout_surface == app_surface, "negative control: the application's own surface is scanned out");
         CHECK(report->contexts_alive == 1, "negative control: no rotate context (%d contexts)", report->contexts_alive);

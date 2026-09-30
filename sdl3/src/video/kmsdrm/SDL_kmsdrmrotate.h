@@ -57,6 +57,12 @@
 // the application (window app_rotation = panel orientation).
 #define SDL_HINT_KMSDRM_PRESENT_ROTATION "SDL_KMSDRM_PRESENT_ROTATION"
 
+/* Opt-in source format for the rotated present. "rgb565" makes the
+   application's logical drawable a direct 16-bit source for the rotate pass;
+   the panel-native present surface remains ARGB8888. Unknown values are
+   ignored. The default is ARGB8888. */
+#define SDL_HINT_KMSDRM_ROTATE_SOURCE_FORMAT "SDL_KMSDRM_ROTATE_SOURCE_FORMAT"
+
 #define SDL_PROP_DISPLAY_KMSDRM_PRESENT_ROTATION_NUMBER "SDL.display.KMSDRM.pocketforge.present_rotation"
 #define SDL_PROP_WINDOW_KMSDRM_PRESENT_ROTATION_NUMBER  "SDL.window.KMSDRM.pocketforge.present_rotation"
 #define SDL_PROP_WINDOW_KMSDRM_APP_ROTATION_NUMBER      "SDL.window.KMSDRM.pocketforge.app_rotation"
