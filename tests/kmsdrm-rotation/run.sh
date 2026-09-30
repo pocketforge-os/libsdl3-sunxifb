@@ -36,6 +36,9 @@
 #   7. red       the base commit's SDL must fail the twiddle experiment
 #                scenario: it has no experiments, so no witness line and no
 #                copy (tsp-mc9m.41.924.16.13.3; skipped once the base has them).
+#   8. red       the base commit must fail the RGB565 rotated-source scenario:
+#                it ignores the opt-in and keeps the app surface ARGB8888
+#                (tsp-mc9m.41.924.16.13.3.1; skipped once the base has it).
 set -euo pipefail
 
 SRC=${SRC:-/src}
@@ -143,13 +146,17 @@ run_case() {
     env -u SDL_KMSDRM_PRESENT_ROTATION \
         LD_LIBRARY_PATH="${FAKE_DIR:-$WORK/fake}:$WORK/prefix-$prefix/lib" \
         EXPECT_WINDOW_FAIL="${EXPECT_WINDOW_FAIL:-0}" \
+        EXPECT_FORMAT_FAIL="${EXPECT_FORMAT_FAIL:-0}" \
+        EXPECT_SOURCE_RGB565="${EXPECT_SOURCE_RGB565:-0}" \
         EXPECT_VULKAN_WINDOW="${EXPECT_VULKAN_WINDOW:-0}" \
         EXPECT_MAKECURRENT_FAIL="${EXPECT_MAKECURRENT_FAIL:-0}" \
         FAKE_EGL_FAIL_MAKECURRENT_SURFACE="${FAKE_EGL_FAIL_MAKECURRENT_SURFACE:-}" \
         FAKE_KMS_FLIP_MS="${FAKE_KMS_FLIP_MS:-}" \
         SDL_KMSDRM_PRESENT_TIMING="${SDL_KMSDRM_PRESENT_TIMING:-}" \
         SDL_KMSDRM_ROTATE_EXPERIMENT="${SDL_KMSDRM_ROTATE_EXPERIMENT:-}" \
+        SDL_KMSDRM_ROTATE_SOURCE_FORMAT="${SDL_KMSDRM_ROTATE_SOURCE_FORMAT:-}" \
         EXPECT_EXPERIMENT="${EXPECT_EXPERIMENT:-}" \
+        FAKE_GBM_RGB565="${FAKE_GBM_RGB565:-1}" \
         FAKE_KMS_PANEL_ORIENTATION="$orientation" FAKE_KMS_ATOMIC="$atomic" \
         FAKE_EGL_NATIVE_FENCE="$native" FAKE_EGL_FENCE_SYNC="$fences" \
         EXPECT_ROTATION="$rotation" EXPECT_PANEL_PROP="$panel" \
@@ -183,6 +190,48 @@ no-property-fenced  none           1 1 1 - 0   0
 lsu-no-fence-sync   Left_Side_Up   1 0 0 - 90  90
 lsu-opt-out         Left_Side_Up   1 1 1 0 0   90
 EOF
+
+# tsp-mc9m.41.924.16.13.3.1: a direct RGB565 application drawable halves the
+# bytes sampled by the rotate pass. Positive 90/270 cases retain the same
+# geometry checks as the ARGB scenarios above; the ordinary lsu-fenced case is
+# the in-invocation default-format negative control. A Normal panel has no
+# rotate source, so the opt-in must not change its direct scanout surface. An
+# unsupported explicit request fails before allocation instead of silently
+# benchmarking ARGB8888.
+source_format_witness() {  # case
+    local name=$1 lines
+    lines=$(grep -cx 'KMSDRM rotated present source format: RGB565 (2 bytes/pixel)' "$WORK/case-$name.log" || true)
+    if [ "$lines" -lt 1 ]; then
+        echo "FAIL: $name: no RGB565 applied-format witness"
+        return 1
+    fi
+    echo "ok: $name: $lines RGB565 applied-format witness line(s)"
+}
+for spec in "rgb565-lsu|Left Side Up|90" "rgb565-rsu|Right Side Up|270"; do
+    IFS='|' read -r name orientation rotation <<<"$spec"
+    if ! { SDL_KMSDRM_ROTATE_SOURCE_FORMAT=rgb565 EXPECT_SOURCE_RGB565=1 \
+           run_case "$name" head "$orientation" 1 1 1 "" "$rotation" "$rotation" &&
+           source_format_witness "$name"; }; then
+        failed+=("$name")
+        sed 's/^/    /' "$WORK/case-$name.log"
+    fi
+done
+if ! SDL_KMSDRM_ROTATE_SOURCE_FORMAT=rgb565 \
+    run_case rgb565-normal head Normal 1 1 1 "" 0 0; then
+    failed+=(rgb565-normal)
+    sed 's/^/    /' "$WORK/case-rgb565-normal.log"
+fi
+if ! FAKE_GBM_RGB565=0 SDL_KMSDRM_ROTATE_SOURCE_FORMAT=rgb565 EXPECT_FORMAT_FAIL=1 \
+    run_case rgb565-unsupported head "Left Side Up" 1 1 1 "" 90 90; then
+    failed+=(rgb565-unsupported)
+    sed 's/^/    /' "$WORK/case-rgb565-unsupported.log"
+fi
+for name in lsu-fenced rgb565-normal rgb565-unsupported; do
+    if grep -q '^KMSDRM rotated present source format: RGB565 ' "$WORK/case-$name.log"; then
+        echo "FAIL: $name: RGB565 applied witness on a default, unrotated, or refused path"
+        failed+=("$name-rgb565-witness")
+    fi
+done
 
 # Vulkan windows stay panel-native: SDL rotates nothing for them, the display
 # keeps the true panel orientation, and the window reports the application owns
@@ -457,6 +506,31 @@ else
         exit 1
     fi
     echo "ok: the base SDL ignores SDL_KMSDRM_ROTATE_EXPERIMENT=twiddle (no copy, no witness): the arm needs this change"
+fi
+
+step "8. red: the base commit's SDL ignores the RGB565 rotate-source opt-in"
+if [ -z "$BASE_SHA" ] || ! git -C "$SRC" cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+    echo "SKIP: no base commit given (BASE_SHA)"
+elif git -C "$SRC" show "$BASE_SHA:sdl3/src/video/kmsdrm/SDL_kmsdrmvideo.c" 2>/dev/null | \
+     grep -q SDL_KMSDRM_ROTATE_SOURCE_FORMAT; then
+    echo "SKIP: base $BASE_SHA already has the RGB565 rotate-source opt-in"
+else
+    if [ ! -d "$WORK/prefix-base" ]; then
+        mkdir -p "$WORK/base-src"
+        git -C "$SRC" archive "$BASE_SHA" sdl3 | tar -x -C "$WORK/base-src"
+        build_sdl "$WORK/base-src" base
+    fi
+    if SDL_KMSDRM_ROTATE_SOURCE_FORMAT=rgb565 EXPECT_SOURCE_RGB565=1 \
+        run_case base-rgb565-rsu base "Right Side Up" 1 1 1 "" 270 270; then
+        echo "FAIL: the base SDL passed the RGB565 source scenario; the test does not detect the missing opt-in" >&2
+        exit 1
+    fi
+    if ! grep -q 'FAIL: the application surface format is RGB565' "$WORK/case-base-rgb565-rsu.log"; then
+        echo "FAIL: the base SDL failed the RGB565 scenario, but not on its ARGB8888 source:" >&2
+        sed 's/^/    /' "$WORK/case-base-rgb565-rsu.log" >&2
+        exit 1
+    fi
+    echo "ok: the base SDL keeps the rotated application source ARGB8888, the defect this change fixes"
 fi
 
 step "RESULT: PASS"

@@ -20,6 +20,7 @@
 typedef struct FakeKmsSurfaceReport
 {
     int w, h;
+    unsigned format;      // GBM fourcc passed to gbm_surface_create
     unsigned flags;       // gbm_surface_create flags
     int alive;
     int swaps;            // eglSwapBuffers on the EGL surface made from it
