@@ -159,6 +159,29 @@ static inline void KMSDRM_PreRotationPhysicalDeltaToLogical(int rotation, float 
     }
 }
 
+/* Copy logical top-down pixels into the panel-native orientation. Cursor BOs
+   and primary-plane readback deliberately share the exact pixel-index map in
+   SDL_kmsdrmorientation.h instead of maintaining another rotation table. */
+static inline void KMSDRM_PreRotationCopyLogicalToPhysical(int rotation, int lw, int lh, int bytes_per_pixel,
+                                                           const void *logical_pixels, int logical_pitch,
+                                                           void *physical_pixels, int physical_pitch)
+{
+    const unsigned char *src = (const unsigned char *)logical_pixels;
+    unsigned char *dst = (unsigned char *)physical_pixels;
+    int lx, ly, byte;
+
+    for (ly = 0; ly < lh; ++ly) {
+        for (lx = 0; lx < lw; ++lx) {
+            int px, py;
+            KMSDRM_RotationLogicalToPhysical(rotation, lw, lh, lx, ly, &px, &py);
+            for (byte = 0; byte < bytes_per_pixel; ++byte) {
+                dst[py * physical_pitch + px * bytes_per_pixel + byte] =
+                    src[ly * logical_pitch + lx * bytes_per_pixel + byte];
+            }
+        }
+    }
+}
+
 /* Convert a top-down physical readback into SDL's logical top-down result.
    `lw`/`lh` describe the requested logical rectangle, not the whole window. */
 static inline void KMSDRM_PreRotationCopyPhysicalToLogical(int rotation, int lw, int lh, int bytes_per_pixel,

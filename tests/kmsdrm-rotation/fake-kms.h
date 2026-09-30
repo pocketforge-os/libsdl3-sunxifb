@@ -16,6 +16,9 @@
 #define FAKE_KMS_PANEL_H 1280
 #define FAKE_KMS_BOS_PER_SURFACE 4
 #define FAKE_KMS_MAX_SURFACES 16
+#define FAKE_KMS_CURSOR_W 64
+#define FAKE_KMS_CURSOR_H 64
+#define FAKE_KMS_CURSOR_BYTES (FAKE_KMS_CURSOR_W * FAKE_KMS_CURSOR_H * 4)
 
 typedef struct FakeKmsSurfaceReport
 {
@@ -81,6 +84,13 @@ typedef struct FakeKmsReport
     /* Hardware-cursor coordinates submitted through drmModeMoveCursor. */
     int cursor_move_calls;
     int cursor_x, cursor_y;
+    int cursor_write_calls;
+    int cursor_bo_w, cursor_bo_h, cursor_bo_stride;
+    int cursor_bo_size;
+    unsigned char cursor_bo[FAKE_KMS_CURSOR_BYTES];
+    int cursor_set_calls;
+    int cursor_set_w, cursor_set_h;
+    int cursor_hot_x, cursor_hot_y;
 
     /* tsp-mc9m.41.924.16.13.3, SDL_KMSDRM_ROTATE_EXPERIMENT: glCopyTexSubImage2D
        calls (the copy texture then samples as the read framebuffer's image), and

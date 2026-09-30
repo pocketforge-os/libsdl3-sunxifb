@@ -30,6 +30,7 @@
 
 #ifdef SDL_VIDEO_DRIVER_KMSDRM
 #include "../../video/kmsdrm/SDL_kmsdrmprerotate.h"
+#include "../../events/SDL_mouse_c.h"
 #endif
 
 /* WebGL doesn't offer client-side arrays, so use Vertex Buffer Objects
@@ -2626,6 +2627,14 @@ static bool GLES2_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL
     data->drawstate.projection[3][3] = 1.0f;
 
     GL_CheckError("", renderer);
+
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+    /* The default cursor may have been uploaded before renderer negotiation
+       made pre-rotation active. Re-upload it against the final transform. */
+    if (data->kmsdrm_prerotation) {
+        SDL_RedrawCursor();
+    }
+#endif
 
     return true;
 

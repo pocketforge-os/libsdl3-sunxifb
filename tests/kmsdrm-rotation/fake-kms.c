@@ -251,7 +251,7 @@ struct gbm_bo
 {
     struct gbm_device *dev;
     int surface;          // index into g_surfaces, -1 for a standalone bo
-    uint32_t w, h, format, handle;
+    uint32_t w, h, format, flags, handle;
     int locked;
     int frame;
     int color_valid;
@@ -330,12 +330,12 @@ FAKE_EXPORT struct gbm_bo *gbm_bo_create(struct gbm_device *gbm, uint32_t width,
                                          uint32_t format, uint32_t flags)
 {
     struct gbm_bo *bo = calloc(1, sizeof(*bo));
-    (void)flags;
     bo->dev = gbm;
     bo->surface = -1;
     bo->w = width;
     bo->h = height;
     bo->format = format;
+    bo->flags = flags;
     bo->handle = g_next_handle++;
     return bo;
 }
@@ -376,9 +376,19 @@ FAKE_EXPORT union gbm_bo_handle gbm_bo_get_handle_for_plane(struct gbm_bo *bo, i
 
 FAKE_EXPORT int gbm_bo_write(struct gbm_bo *bo, const void *buf, size_t count)
 {
-    (void)bo;
-    (void)buf;
-    (void)count;
+    if ((bo->flags & GBM_BO_USE_CURSOR) != 0) {
+        if (count > sizeof(g_report.cursor_bo)) {
+            fake_error("cursor BO write of %zu bytes exceeds report capacity %zu",
+                       count, sizeof(g_report.cursor_bo));
+            return -EINVAL;
+        }
+        ++g_report.cursor_write_calls;
+        g_report.cursor_bo_w = (int)bo->w;
+        g_report.cursor_bo_h = (int)bo->h;
+        g_report.cursor_bo_stride = (int)gbm_bo_get_stride(bo);
+        g_report.cursor_bo_size = (int)count;
+        memcpy(g_report.cursor_bo, buf, count);
+    }
     return 0;
 }
 
@@ -947,14 +957,24 @@ FAKE_EXPORT int drmModeSetCrtc(int fd, uint32_t crtcId, uint32_t bufferId, uint3
 
 FAKE_EXPORT int drmModeSetCursor(int fd, uint32_t crtcId, uint32_t bo_handle, uint32_t width, uint32_t height)
 {
-    (void)fd; (void)crtcId; (void)bo_handle; (void)width; (void)height;
+    (void)fd; (void)crtcId; (void)bo_handle;
+    ++g_report.cursor_set_calls;
+    g_report.cursor_set_w = (int)width;
+    g_report.cursor_set_h = (int)height;
+    g_report.cursor_hot_x = 0;
+    g_report.cursor_hot_y = 0;
     return 0;
 }
 
 FAKE_EXPORT int drmModeSetCursor2(int fd, uint32_t crtcId, uint32_t bo_handle, uint32_t width, uint32_t height,
                                   int32_t hot_x, int32_t hot_y)
 {
-    (void)fd; (void)crtcId; (void)bo_handle; (void)width; (void)height; (void)hot_x; (void)hot_y;
+    (void)fd; (void)crtcId; (void)bo_handle;
+    ++g_report.cursor_set_calls;
+    g_report.cursor_set_w = (int)width;
+    g_report.cursor_set_h = (int)height;
+    g_report.cursor_hot_x = hot_x;
+    g_report.cursor_hot_y = hot_y;
     return 0;
 }
 

@@ -140,6 +140,10 @@ cc -std=c99 -O1 -g -Wall -Wextra "${NOX11[@]}" \
     -I"$WORK/prefix-head/include" -I"$T" -I"$KMSDRM" \
     -o "$WORK/test-kmsdrm-prerotate" "$T/test-kmsdrm-prerotate.c" \
     -L"$WORK/prefix-head/lib" -lSDL3-pocketforge -ldl
+cc -std=c99 -O1 -g -Wall -Wextra "${NOX11[@]}" \
+    -I"$WORK/prefix-head/include" -I"$T" -I"$KMSDRM" \
+    -o "$WORK/test-kmsdrm-cursor" "$T/test-kmsdrm-cursor.c" \
+    -L"$WORK/prefix-head/lib" -lSDL3-pocketforge -ldl
 
 mkdir -p /dev/dri
 : >/dev/dri/card0
@@ -438,6 +442,28 @@ done <<'EOF'
 prerotate-renderer-off Left_Side_Up 90 0
 prerotate-renderer-lsu Left_Side_Up 90 1
 prerotate-renderer-rsu Right_Side_Up 270 1
+EOF
+# Cursor bitmap, footprint and hotspot use the same panel transform as the
+# direct-rendered primary plane. The Normal case is the byte-identical control.
+while read -r name orientation rotation enabled; do
+    log="$WORK/case-$name.log"
+    rc=0
+    env LD_LIBRARY_PATH="$WORK/fake:$WORK/prefix-head/lib" \
+        FAKE_KMS_PANEL_ORIENTATION="${orientation//_/ }" FAKE_KMS_ATOMIC=1 \
+        FAKE_EGL_NATIVE_FENCE=1 FAKE_EGL_FENCE_SYNC=1 FAKE_GBM_CURSOR=1 \
+        EXPECT_ROTATION=$rotation EXPECT_PREROTATE=$enabled \
+        "$WORK/test-kmsdrm-cursor" >"$log" 2>&1 || rc=$?
+    printf '%-28s rc=%d  %s\n' "$name" "$rc" "$(grep -E '^RESULT:' "$log" || echo 'RESULT: none')"
+    if [ "$rc" -ne 0 ]; then
+        failed+=("$name")
+        sed 's/^/    /' "$log"
+    fi
+done <<'EOF'
+prerotate-cursor-normal Normal 0 1
+prerotate-cursor-off Left_Side_Up 90 0
+prerotate-cursor-lsu Left_Side_Up 90 1
+prerotate-cursor-upside-down Upside_Down 180 1
+prerotate-cursor-rsu Right_Side_Up 270 1
 EOF
 if ! SDL_KMSDRM_RENDERER_PREROTATION=1 \
     run_case prerotate-raw-fallback head "Left Side Up" 1 1 1 "" 90 90; then
