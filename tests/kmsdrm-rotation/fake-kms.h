@@ -101,6 +101,8 @@ typedef struct FakeKmsReport
     int scanouts;
     int scanout_surface;       // gbm surface index, -1 for a non-surface FB
     int scanout_w, scanout_h;
+    int scanout_color_valid;   // uniform clear colour carried by the scanned-out BO
+    float scanout_color[4];
     int plane_src_w, plane_src_h;   // atomic SRC_W/SRC_H >> 16 of the last commit
     int plane_crtc_w, plane_crtc_h;
     int atomic_commits;

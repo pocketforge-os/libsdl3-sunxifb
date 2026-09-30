@@ -88,7 +88,43 @@ void KMSDRM_GLES_UnloadLibrary(SDL_VideoDevice *_this)
        so we manually unload the library whenever we want. */
 }
 
-SDL_EGL_CreateContext_impl(KMSDRM)
+/* Resolve the opt-in before a context can submit application rendering. The
+   GLES2 SDL_Renderer publishes the active property before creating its
+   context; raw GL and other GL renderers do not, so they are moved to the
+   established logical-surface plus rotated-present path here. */
+static bool KMSDRM_GLES_ResolvePreRotation(SDL_VideoDevice *_this, SDL_Window *window)
+{
+    SDL_WindowData *windata;
+    SDL_PropertiesID props;
+
+    if (!window) {
+        return true;
+    }
+    windata = (SDL_WindowData *)window->internal;
+    if (!windata || !windata->renderer_prerotation_requested ||
+        windata->renderer_prerotation_disabled) {
+        return true;
+    }
+
+    props = SDL_GetWindowProperties(window);
+    if (SDL_GetBooleanProperty(props, KMSDRM_PREROTATION_ACTIVE_PROPERTY, false)) {
+        return true;
+    }
+
+    windata->renderer_prerotation_disabled = true;
+    SDL_ClearProperty(props, KMSDRM_PREROTATION_WINDOW_PROPERTY);
+    SDL_ClearProperty(props, KMSDRM_PREROTATION_ACTIVE_PROPERTY);
+    SDL_Log("KMSDRM SDL_Renderer pre-rotation fallback before GL rendering: no supported renderer handshake");
+    return KMSDRM_CreateSurfaces(_this, window);
+}
+
+SDL_GLContext KMSDRM_GLES_CreateContext(SDL_VideoDevice *_this, SDL_Window *window)
+{
+    if (!KMSDRM_GLES_ResolvePreRotation(_this, window)) {
+        return NULL;
+    }
+    return SDL_EGL_CreateContext(_this, window->internal->egl_surface);
+}
 
 bool KMSDRM_GLES_SetSwapInterval(SDL_VideoDevice *_this, int interval)
 {
@@ -573,18 +609,6 @@ bool KMSDRM_GLES_SwapWindow(SDL_VideoDevice *_this, SDL_Window * window)
     Uint64 stage_start;
     bool result;
 
-    /* A pre-rotation candidate becomes direct scanout only after the GLES2
-       SDL_Renderer acknowledges it. Raw GL and unsupported renderers fail
-       closed to the established two-surface rotate path. */
-    if (windata->renderer_prerotation_requested && !windata->renderer_prerotation_disabled &&
-        !SDL_GetBooleanProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_ACTIVE_PROPERTY, false)) {
-        windata->renderer_prerotation_disabled = true;
-        SDL_ClearProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_WINDOW_PROPERTY);
-        SDL_ClearProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_ACTIVE_PROPERTY);
-        SDL_Log("KMSDRM SDL_Renderer pre-rotation fallback: no supported renderer handshake");
-        return KMSDRM_CreateSurfaces(_this, window);
-    }
-
     if (windata->swap_window == NULL) {
         SDL_VideoData *viddata = _this->internal;
         // PocketForge: SDL_KMSDRM_PRESENT_TIMING, read once per window.
@@ -612,6 +636,12 @@ bool KMSDRM_GLES_SwapWindow(SDL_VideoDevice *_this, SDL_Window * window)
     return result;
 }
 
-SDL_EGL_MakeCurrent_impl(KMSDRM)
+bool KMSDRM_GLES_MakeCurrent(SDL_VideoDevice *_this, SDL_Window *window, SDL_GLContext context)
+{
+    if (window && context && !KMSDRM_GLES_ResolvePreRotation(_this, window)) {
+        return false;
+    }
+    return SDL_EGL_MakeCurrent(_this, window ? window->internal->egl_surface : EGL_NO_SURFACE, context);
+}
 
 #endif // SDL_VIDEO_DRIVER_KMSDRM

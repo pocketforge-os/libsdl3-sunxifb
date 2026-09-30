@@ -158,6 +158,8 @@ run_case() {
         EXPECT_SOURCE_RGB565="${EXPECT_SOURCE_RGB565:-0}" \
         EXPECT_VULKAN_WINDOW="${EXPECT_VULKAN_WINDOW:-0}" \
         EXPECT_MAKECURRENT_FAIL="${EXPECT_MAKECURRENT_FAIL:-0}" \
+        EXPECT_SINGLE_FRAME="${EXPECT_SINGLE_FRAME:-0}" \
+        EXPECT_CONTEXT_FAIL="${EXPECT_CONTEXT_FAIL:-0}" \
         FAKE_EGL_FAIL_MAKECURRENT_SURFACE="${FAKE_EGL_FAIL_MAKECURRENT_SURFACE:-}" \
         FAKE_KMS_FLIP_MS="${FAKE_KMS_FLIP_MS:-}" \
         SDL_KMSDRM_PRESENT_TIMING="${SDL_KMSDRM_PRESENT_TIMING:-}" \
@@ -440,6 +442,16 @@ if ! SDL_KMSDRM_RENDERER_PREROTATION=1 \
     run_case prerotate-raw-fallback head "Left Side Up" 1 1 1 "" 90 90; then
     failed+=(prerotate-raw-fallback)
     sed 's/^/    /' "$WORK/case-prerotate-raw-fallback.log"
+fi
+if ! EXPECT_SINGLE_FRAME=1 SDL_KMSDRM_RENDERER_PREROTATION=1 \
+    run_case prerotate-raw-one-frame head "Left Side Up" 1 1 1 "" 90 90; then
+    failed+=(prerotate-raw-one-frame)
+    sed 's/^/    /' "$WORK/case-prerotate-raw-one-frame.log"
+fi
+if ! FAKE_DIR="$WORK/fake-nolink" EXPECT_CONTEXT_FAIL=1 SDL_KMSDRM_RENDERER_PREROTATION=1 \
+    run_case prerotate-raw-fallback-fails head "Left Side Up" 1 1 1 "" 90 90; then
+    failed+=(prerotate-raw-fallback-fails)
+    sed 's/^/    /' "$WORK/case-prerotate-raw-fallback-fails.log"
 fi
 
 if [ "${#failed[@]}" -ne 0 ]; then

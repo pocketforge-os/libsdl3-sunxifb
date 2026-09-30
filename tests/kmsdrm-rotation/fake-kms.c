@@ -254,6 +254,8 @@ struct gbm_bo
     uint32_t w, h, format, handle;
     int locked;
     int frame;
+    int color_valid;
+    float color[4];
     int destroyed;
     void *user_data;
     void (*destroy_user_data)(struct gbm_bo *, void *);
@@ -511,6 +513,7 @@ typedef struct FakeFb
     uint32_t id;
     int w, h;
     int surface;
+    struct gbm_bo *bo;
     int alive;
 } FakeFb;
 
@@ -526,7 +529,7 @@ static FakeFb *find_fb(uint32_t id)
     int i;
 
     if (id == FB_FBCON) {
-        static FakeFb fbcon = { FB_FBCON, FAKE_KMS_PANEL_W, FAKE_KMS_PANEL_H, -1, 1 };
+        static FakeFb fbcon = { FB_FBCON, FAKE_KMS_PANEL_W, FAKE_KMS_PANEL_H, -1, NULL, 1 };
         return &fbcon;
     }
     for (i = 0; i < g_num_fbs; ++i) {
@@ -551,6 +554,7 @@ static int add_fb(uint32_t width, uint32_t height, uint32_t handle, uint32_t *bu
     fb->w = (int)width;
     fb->h = (int)height;
     fb->surface = bo ? bo->surface : -1;
+    fb->bo = bo;
     fb->alive = 1;
     if (bo && (bo->w != width || bo->h != height)) {
         fake_error("AddFB %ux%u for a %ux%u buffer", width, height, bo->w, bo->h);
@@ -576,6 +580,12 @@ static int scanout(uint32_t fb_id, const char *what)
     g_report.scanout_surface = fb->surface;
     g_report.scanout_w = fb->w;
     g_report.scanout_h = fb->h;
+    g_report.scanout_color_valid = fb->bo && fb->bo->color_valid;
+    if (g_report.scanout_color_valid) {
+        memcpy(g_report.scanout_color, fb->bo->color, sizeof(g_report.scanout_color));
+    } else {
+        memset(g_report.scanout_color, 0, sizeof(g_report.scanout_color));
+    }
     return 0;
 }
 
@@ -1245,6 +1255,7 @@ typedef struct FakeContext
     FakeFramebuffer framebuffers[16];
     int num_framebuffers;
     GLuint bound_framebuffer; // 0: the current draw surface
+    GLfloat clear_color[4];
     GLint viewport[4];
     GLint scissor[4];
     GLfloat projection[16];
@@ -1750,12 +1761,23 @@ FAKE_EXPORT void glBindAttribLocation(GLuint program, GLuint index, const GLchar
 FAKE_EXPORT void glClear(GLbitfield mask)
 {
     FakeContext *ctx = gl_ctx("glClear");
-    (void)mask;
-    if (ctx && !ctx->bound_framebuffer && g_draw && g_draw->gs) {
+    if (ctx && (mask & GL_COLOR_BUFFER_BIT) && !ctx->bound_framebuffer && g_draw && g_draw->gs) {
+        struct gbm_bo *bo = &g_draw->gs->bos[g_draw->gs->back];
         g_report.surfaces[g_draw->gs->index].clears++;
+        bo->color_valid = 1;
+        memcpy(bo->color, ctx->clear_color, sizeof(bo->color));
     }
 }
-FAKE_EXPORT void glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { (void)r; (void)g; (void)b; (void)a; gl_ctx("glClearColor"); }
+FAKE_EXPORT void glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a)
+{
+    FakeContext *ctx = gl_ctx("glClearColor");
+    if (ctx) {
+        ctx->clear_color[0] = r;
+        ctx->clear_color[1] = g;
+        ctx->clear_color[2] = b;
+        ctx->clear_color[3] = a;
+    }
+}
 FAKE_EXPORT void glCompileShader(GLuint shader) { (void)shader; gl_ctx("glCompileShader"); }
 FAKE_EXPORT void glDeleteProgram(GLuint program) { (void)program; gl_ctx("glDeleteProgram"); }
 FAKE_EXPORT void glDeleteShader(GLuint shader) { (void)shader; gl_ctx("glDeleteShader"); }
@@ -2159,6 +2181,11 @@ FAKE_EXPORT void glDrawArrays(GLenum mode, GLint first, GLsizei count)
     memcpy(draw->pos, ctx->attrib[0], sizeof(draw->pos));
     memcpy(draw->uv, ctx->attrib[1], sizeof(draw->uv));
     g_report.draws++;
+    if (g_draw && g_draw->gs) {
+        struct gbm_bo *target = &g_draw->gs->bos[g_draw->gs->back];
+        target->color_valid = tex->image->bo->color_valid;
+        memcpy(target->color, tex->image->bo->color, sizeof(target->color));
+    }
     if (!draw->source_locked) {
         fake_error("rotate pass sampled a buffer the application surface may render into (not locked)");
     }

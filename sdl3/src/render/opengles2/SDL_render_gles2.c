@@ -2512,6 +2512,26 @@ static bool GLES2_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL
     renderer->SetVSync = GLES2_SetVSync;
     renderer->name = GLES2_RenderDriver.name;
 
+#ifdef SDL_VIDEO_DRIVER_KMSDRM
+    /* Publish support before SDL_GL_CreateContext enters KMSDRM. Raw GL and
+       unsupported GL renderers do not publish this handshake, so KMSDRM can
+       select their ordinary rotated-present surfaces before they render. */
+    data->kmsdrm_prerotation = (int)SDL_GetNumberProperty(SDL_GetWindowProperties(window),
+                                                          KMSDRM_PREROTATION_WINDOW_PROPERTY, 0);
+    SDL_GetWindowSize(window, &data->logical_drawablew, &data->logical_drawableh);
+    if (data->kmsdrm_prerotation && KMSDRM_RotationIsValid(data->kmsdrm_prerotation)) {
+        if (data->logical_drawablew > 0 && data->logical_drawableh > 0) {
+            SDL_SetBooleanProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_ACTIVE_PROPERTY, true);
+            SDL_Log("KMSDRM SDL_Renderer pre-rotation active: renderer=opengles2 rotation=%d logical=%dx%d",
+                    data->kmsdrm_prerotation, data->logical_drawablew, data->logical_drawableh);
+        } else {
+            data->kmsdrm_prerotation = 0;
+        }
+    } else {
+        data->kmsdrm_prerotation = 0;
+    }
+#endif
+
     // Create an OpenGL ES 2.0 context
     SDL_GL_SetAttribute(SDL_GL_FRAMEBUFFER_SRGB_CAPABLE, 0);
     data->context = SDL_GL_CreateContext(window);
@@ -2604,23 +2624,6 @@ static bool GLES2_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL
     data->drawstate.clear_color.a = 1.0f;
     data->drawstate.projection[3][0] = -1.0f;
     data->drawstate.projection[3][3] = 1.0f;
-
-#ifdef SDL_VIDEO_DRIVER_KMSDRM
-    data->kmsdrm_prerotation = (int)SDL_GetNumberProperty(SDL_GetWindowProperties(window),
-                                                          KMSDRM_PREROTATION_WINDOW_PROPERTY, 0);
-    SDL_GetWindowSize(window, &data->logical_drawablew, &data->logical_drawableh);
-    if (data->kmsdrm_prerotation && KMSDRM_RotationIsValid(data->kmsdrm_prerotation)) {
-        if (data->logical_drawablew > 0 && data->logical_drawableh > 0) {
-            SDL_SetBooleanProperty(SDL_GetWindowProperties(window), KMSDRM_PREROTATION_ACTIVE_PROPERTY, true);
-            SDL_Log("KMSDRM SDL_Renderer pre-rotation active: renderer=opengles2 rotation=%d logical=%dx%d",
-                    data->kmsdrm_prerotation, data->logical_drawablew, data->logical_drawableh);
-        } else {
-            data->kmsdrm_prerotation = 0;
-        }
-    } else {
-        data->kmsdrm_prerotation = 0;
-    }
-#endif
 
     GL_CheckError("", renderer);
 
