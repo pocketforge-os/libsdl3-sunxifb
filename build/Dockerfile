@@ -162,6 +162,7 @@ RUN dpkg --add-architecture arm64 \
         libpulse-dev:arm64 \
         libudev-dev:arm64 \
         libdbus-1-dev:arm64 \
+        libffi-dev:arm64 \
         libwayland-dev:arm64 \
         libxkbcommon-dev:arm64 \
         libdrm-dev:arm64 \
@@ -179,6 +180,7 @@ ARG CROSS_SYSROOT=/opt/arm-10.3-2021.07/aarch64-none-linux-gnu/libc
 RUN set -eux; \
     SRC_LIB=/usr/lib/aarch64-linux-gnu; \
     SRC_INC=/usr/include; \
+    SRC_MULTI_INC=/usr/include/aarch64-linux-gnu; \
     DST_LIB=${CROSS_SYSROOT}/usr/lib; \
     DST_INC=${CROSS_SYSROOT}/usr/include; \
     PKG_DST=${DST_LIB}/pkgconfig; \
@@ -190,6 +192,7 @@ RUN set -eux; \
         'libpulse*' \
         'libudev*' \
         'libdbus-1*' \
+        'libffi*' \
         'libwayland-client*' \
         'libwayland-cursor*' \
         'libwayland-egl*' \
@@ -200,7 +203,7 @@ RUN set -eux; \
     done; \
     # Pkg-config: copy files, rewrite multiarch lib paths to sysroot-relative.
     if [ -d "${SRC_LIB}/pkgconfig" ]; then \
-        for pc in alsa libpulse libpulse-simple libudev dbus-1 wayland-client wayland-cursor wayland-egl xkbcommon libdrm libkms gbm; do \
+        for pc in alsa libpulse libpulse-simple libudev dbus-1 libffi wayland-client wayland-cursor wayland-egl xkbcommon libdrm libkms gbm; do \
             f="${SRC_LIB}/pkgconfig/${pc}.pc"; \
             [ -f "$f" ] || continue; \
             sed 's|/usr/lib/aarch64-linux-gnu|${prefix}/lib|g; s|${prefix}/lib/aarch64-linux-gnu|${prefix}/lib|g; s|/usr/include|${prefix}/include|g; s|^prefix=.*|prefix='"${CROSS_SYSROOT}"'/usr|' \
@@ -219,11 +222,15 @@ RUN set -eux; \
     for h in libudev.h alsa-symbols.h alsa-version.h gbm.h xf86drm.h xf86drmMode.h; do \
         if [ -f "${SRC_INC}/${h}" ]; then cp -a "${SRC_INC}/${h}" "${DST_INC}/"; fi; \
     done; \
+    for h in ffi.h ffitarget.h; do \
+        test -f "${SRC_MULTI_INC}/${h}"; \
+        cp -a "${SRC_MULTI_INC}/${h}" "${DST_INC}/"; \
+    done; \
     find "${SRC_INC}" -maxdepth 1 -name 'wayland*.h' -exec cp -a {} "${DST_INC}/" \;; \
     # Verify target-only metadata. PKG_CONFIG_LIBDIR suppresses host defaults;
     # rewritten paths must point back into the ARM64 sysroot.
-    PKG_CONFIG_LIBDIR=${PKG_DST} pkg-config --exists alsa wayland-client wayland-cursor wayland-egl xkbcommon libdrm gbm; \
-    for pc in wayland-client wayland-cursor wayland-egl xkbcommon libdrm gbm; do \
+    PKG_CONFIG_LIBDIR=${PKG_DST} pkg-config --exists alsa libffi wayland-client wayland-cursor wayland-egl xkbcommon libdrm gbm; \
+    for pc in libffi wayland-client wayland-cursor wayland-egl xkbcommon libdrm gbm; do \
         test "$(PKG_CONFIG_LIBDIR=${PKG_DST} pkg-config --variable=pcfiledir ${pc})" = "${PKG_DST}"; \
         test "$(PKG_CONFIG_LIBDIR=${PKG_DST} pkg-config --variable=libdir ${pc})" = "${DST_LIB}"; \
         test "$(PKG_CONFIG_LIBDIR=${PKG_DST} pkg-config --variable=includedir ${pc})" = "${DST_INC}"; \
@@ -233,11 +240,13 @@ RUN set -eux; \
     test -f "${DST_INC}/xf86drmMode.h"; \
     test -f "${DST_INC}/wayland-client.h"; \
     test -f "${DST_INC}/xkbcommon/xkbcommon.h"; \
+    test -f "${DST_INC}/ffi.h"; \
     test -e "${DST_LIB}/libgbm.so"; \
     test -e "${DST_LIB}/libwayland-client.so"; \
     test -e "${DST_LIB}/libwayland-egl.so"; \
     test -e "${DST_LIB}/libwayland-cursor.so"; \
     test -e "${DST_LIB}/libxkbcommon.so"; \
+    test -e "${DST_LIB}/libffi.so"; \
     wayland-scanner --version; \
     echo "Cross sysroot now has: $(ls ${DST_LIB}/libasound* ${DST_LIB}/libpulse* ${DST_LIB}/libudev* ${DST_LIB}/libdrm* ${DST_LIB}/libgbm* | wc -l) lib files"
 
