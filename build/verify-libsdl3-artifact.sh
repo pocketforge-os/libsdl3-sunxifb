@@ -22,6 +22,10 @@ if printf '%s\n' "${dynamic}" | grep -E '\((RPATH|RUNPATH)\)' >/dev/null; then
   echo "FATAL: shipped SDL artifact contains RPATH or RUNPATH" >&2
   exit 1
 fi
+if ! printf '%s\n' "${dynamic}" | grep -F '(SONAME)' | grep -F '[libSDL3-pocketforge.so.0]' >/dev/null; then
+  echo "FATAL: SDL artifact SONAME is not libSDL3-pocketforge.so.0" >&2
+  exit 1
+fi
 if ! symbols=$("${NM}" -D "${SO}"); then
   echo "FATAL: nm inspection failed for SDL artifact" >&2
   exit 1
@@ -51,7 +55,7 @@ fi
 symbol_names=$(printf '%s\n' "${symbol_table}" | awk 'NF { print $NF }')
 echo "SDL video bootstrap symbols:"
 printf '%s\n' "${symbol_names}" \
-  | grep -Ex '(SUNXIFB|KMSDRM)_bootstrap' \
+  | grep -Ex '(SUNXIFB|KMSDRM|Wayland)_bootstrap' \
   | sort -u || true
 
 has_artifact_string() {
@@ -68,6 +72,25 @@ has_symbol() {
 has_needed() {
   printf '%s\n' "${dynamic}" | grep -F '(NEEDED)' | grep -F "[$1]" >/dev/null
 }
+
+# A generic "wayland" string can come from public SDL properties even when the
+# video backend is absent. Require its compiled bootstrap and the four runtime
+# libraries named by SDL's dynamic loader. Direct linkage is forbidden so the
+# singleton remains loadable for Steam Link's compositor-free sunxifb path.
+if ! has_symbol Wayland_bootstrap; then
+  echo "FATAL: SDL artifact is missing the Wayland_bootstrap symbol (Wayland video backend not compiled, or the symbol table was stripped)" >&2
+  exit 1
+fi
+for runtime_lib in libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libxkbcommon.so.0; do
+  if ! has_artifact_string "${runtime_lib}"; then
+    echo "FATAL: SDL artifact is missing dynamic Wayland runtime evidence: ${runtime_lib}" >&2
+    exit 1
+  fi
+  if has_needed "${runtime_lib}"; then
+    echo "FATAL: SDL artifact links ${runtime_lib} directly instead of using SDL's dynamic Wayland loader" >&2
+    exit 1
+  fi
+done
 
 case "${PF_GPU_MODEL}" in
   open)

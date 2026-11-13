@@ -648,7 +648,10 @@ endmacro()
 # - HAVE_SDL_LOADSO opt
 macro(CheckWayland)
   if(SDL_WAYLAND)
-    set(WAYLAND_PKG_CONFIG_SPEC "wayland-client>=1.18" wayland-egl wayland-cursor egl "xkbcommon>=0.5.0")
+    # EGL comes from the selected PocketForge graphics prefix (PowerVR DDK or
+    # Mesa), which intentionally lives outside the base target sysroot and may
+    # not ship pkg-config metadata. CheckEGL validates that provider separately.
+    set(WAYLAND_PKG_CONFIG_SPEC "wayland-client>=1.18" wayland-egl wayland-cursor "xkbcommon>=0.5.0")
     if(PKG_CONFIG_FOUND)
       pkg_check_modules(PC_WAYLAND IMPORTED_TARGET ${WAYLAND_PKG_CONFIG_SPEC})
     else()

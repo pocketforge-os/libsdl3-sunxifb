@@ -10,6 +10,7 @@ SCRIPT=${BUILD_DIR}/build-libsdl3.sh
 VERIFY=${BUILD_DIR}/verify-libsdl3-artifact.sh
 DOCKERFILE=${BUILD_DIR}/Dockerfile
 TOOLCHAIN=${BUILD_DIR}/toolchain-arm-10.3-2021.07.cmake
+SDLCHECKS=${BUILD_DIR}/../sdl3/cmake/sdlchecks.cmake
 
 require_literal() {
   file=$1
@@ -25,17 +26,29 @@ require_literal "${SCRIPT}" '-DCMAKE_SKIP_RPATH=ON'
 require_literal "${SCRIPT}" '-DSDL_KMSDRM="${SDL_KMSDRM}"'
 require_literal "${SCRIPT}" '-DSDL_KMSDRM_SHARED=ON'
 require_literal "${SCRIPT}" '-DSDL_SUNXIFB="${SDL_SUNXIFB}"'
+require_literal "${SCRIPT}" '-DSDL_WAYLAND=ON -DSDL_WAYLAND_SHARED=ON'
 require_literal "${SCRIPT}" 'require_target_pkg_config gbm'
+require_literal "${SCRIPT}" 'require_target_pkg_config wayland-client'
+require_literal "${SCRIPT}" 'require_target_pkg_config wayland-egl'
+require_literal "${SCRIPT}" 'require_target_pkg_config wayland-cursor'
+require_literal "${SCRIPT}" 'require_target_pkg_config xkbcommon'
 require_literal "${SCRIPT}" 'GRAPHICS_CONFIG_STAMP=${OUT}/.pocketforge-sdl-graphics-config'
 require_literal "${SCRIPT}" 'rm -f "${OUT}/CMakeCache.txt"'
 require_literal "${SCRIPT}" 'verify-libsdl3-artifact.sh'
+require_literal "${VERIFY}" 'has_symbol Wayland_bootstrap'
 require_literal "${DOCKERFILE}" 'libgbm-dev:arm64'
+require_literal "${DOCKERFILE}" 'libwayland-dev:arm64'
+require_literal "${DOCKERFILE}" 'libxkbcommon-dev:arm64'
+require_literal "${DOCKERFILE}" 'libwayland-bin'
 require_literal "${DOCKERFILE}" "'libgbm*'"
-require_literal "${DOCKERFILE}" 'pkg-config --exists alsa libdrm gbm'
+require_literal "${DOCKERFILE}" 'pkg-config --exists alsa wayland-client wayland-cursor wayland-egl xkbcommon libdrm gbm'
+require_literal "${DOCKERFILE}" 'test -f "${DST_INC}/wayland-client.h"'
+require_literal "${DOCKERFILE}" 'test -f "${DST_INC}/xkbcommon/xkbcommon.h"'
 require_literal "${DOCKERFILE}" 'test -f "${DST_INC}/gbm.h"'
 require_literal "${DOCKERFILE}" 'test -f "${DST_INC}/xf86drm.h"'
 require_literal "${DOCKERFILE}" 'test -f "${DST_INC}/xf86drmMode.h"'
 require_literal "${TOOLCHAIN}" 'list(APPEND CMAKE_FIND_ROOT_PATH "${SUNXIFB_DDK_ROOT}")'
+require_literal "${SDLCHECKS}" 'set(WAYLAND_PKG_CONFIG_SPEC "wayland-client>=1.18" wayland-egl wayland-cursor "xkbcommon>=0.5.0")'
 
 TMP=$(mktemp -d)
 trap 'rm -rf "${TMP}"' EXIT HUP INT TERM
@@ -65,25 +78,28 @@ make_nm_stub() {
 
 # Current (pre-tsp-f3fm.218) open build shape: sunxifb and KMSDRM together.
 make_stub readelf-ok \
-  "printf '%s\\n' ' 0x1 (NEEDED) Shared library: [libEGL.so.1]' ' 0x1 (NEEDED) Shared library: [libGLESv2.so.2]'"
-make_stub readelf-no-gl "echo ' 0x1 (NEEDED) Shared library: [libc.so.6]'"
-make_nm_stub nm-ddk 'echo "00001000 d SUNXIFB_bootstrap"'
-make_nm_stub nm-open 'echo "00002000 d KMSDRM_bootstrap"'
-make_nm_stub nm-open-with-sunxifb 'echo "00001000 d SUNXIFB_bootstrap"' 'echo "00002000 d KMSDRM_bootstrap"'
-make_nm_stub nm-ddk-with-kms 'echo "00001000 d SUNXIFB_bootstrap"' 'echo "00002000 d KMSDRM_bootstrap"'
+  "printf '%s\\n' ' 0x0 (SONAME) Library soname: [libSDL3-pocketforge.so.0]' ' 0x1 (NEEDED) Shared library: [libEGL.so.1]' ' 0x1 (NEEDED) Shared library: [libGLESv2.so.2]'"
+make_stub readelf-no-gl "printf '%s\\n' ' 0x0 (SONAME) Library soname: [libSDL3-pocketforge.so.0]' ' 0x1 (NEEDED) Shared library: [libc.so.6]'"
+make_nm_stub nm-ddk 'echo "00000500 d Wayland_bootstrap"' 'echo "00001000 d SUNXIFB_bootstrap"'
+make_nm_stub nm-open 'echo "00000500 d Wayland_bootstrap"' 'echo "00002000 d KMSDRM_bootstrap"'
+make_nm_stub nm-open-with-sunxifb 'echo "00000500 d Wayland_bootstrap"' 'echo "00001000 d SUNXIFB_bootstrap"' 'echo "00002000 d KMSDRM_bootstrap"'
+make_nm_stub nm-ddk-with-kms 'echo "00000500 d Wayland_bootstrap"' 'echo "00001000 d SUNXIFB_bootstrap"' 'echo "00002000 d KMSDRM_bootstrap"'
+make_nm_stub nm-ddk-no-wayland 'echo "00001000 d SUNXIFB_bootstrap"'
 make_stub nm-stripped \
   'if [ "${1:-}" = -D ]; then echo "00000000 T SDL_DYNAPI_entry"; exit 0; fi' \
   'echo "nm: $1: no symbols" >&2'
 make_stub nm-symtab-fails \
   'if [ "${1:-}" = -D ]; then echo "00000000 T SDL_DYNAPI_entry"; exit 0; fi' \
   'exit 23'
-make_stub strings-ddk "printf '%s\\n' sunxifb dummy"
-make_stub strings-open "printf '%s\\n' kmsdrm dummy libdrm.so.2 libgbm.so.1"
-make_stub strings-open-with-sunxifb "printf '%s\\n' sunxifb kmsdrm dummy libdrm.so.2 libgbm.so.1"
-make_stub strings-open-no-kms "printf '%s\\n' dummy libdrm.so.2 libgbm.so.1"
-make_stub strings-open-no-gbm "printf '%s\\n' kmsdrm dummy libdrm.so.2"
-make_stub strings-ddk-with-kms "printf '%s\\n' sunxifb kmsdrm dummy"
-make_stub strings-no-sunxifb "printf '%s\\n' dummy"
+make_stub strings-ddk "printf '%s\\n' wayland sunxifb dummy libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libxkbcommon.so.0"
+make_stub strings-open "printf '%s\\n' wayland kmsdrm dummy libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libxkbcommon.so.0 libdrm.so.2 libgbm.so.1"
+make_stub strings-open-with-sunxifb "printf '%s\\n' wayland sunxifb kmsdrm dummy libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libxkbcommon.so.0 libdrm.so.2 libgbm.so.1"
+make_stub strings-open-no-kms "printf '%s\\n' wayland dummy libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libxkbcommon.so.0 libdrm.so.2 libgbm.so.1"
+make_stub strings-open-no-gbm "printf '%s\\n' wayland kmsdrm dummy libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libxkbcommon.so.0 libdrm.so.2"
+make_stub strings-ddk-with-kms "printf '%s\\n' wayland sunxifb kmsdrm dummy libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libxkbcommon.so.0"
+make_stub strings-no-sunxifb "printf '%s\\n' wayland dummy libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libxkbcommon.so.0"
+make_stub strings-generic-wayland "printf '%s\\n' wayland sunxifb dummy"
+make_stub strings-wayland-no-cursor "printf '%s\\n' wayland sunxifb dummy libwayland-client.so.0 libwayland-egl.so.1 libxkbcommon.so.0"
 make_stub symver-ok 'exit 0'
 make_stub fail 'exit 23'
 
@@ -124,14 +140,35 @@ expect_verify_fail 'a failing symbol-table nm' 'FATAL: nm symbol-table inspectio
 expect_verify_fail 'a failing symbol-version check' 'FATAL: glibc symbol-version inspection failed' \
   ddk "${TMP}/readelf-ok" "${TMP}/nm-ddk" "${TMP}/strings-ddk" "${TMP}/fail"
 
+make_stub readelf-no-soname \
+  "printf '%s\\n' ' 0x1 (NEEDED) Shared library: [libEGL.so.1]' ' 0x1 (NEEDED) Shared library: [libGLESv2.so.2]'"
+expect_verify_fail 'the old production contract without the PocketForge SONAME' \
+  'FATAL: SDL artifact SONAME is not libSDL3-pocketforge.so.0' \
+  ddk "${TMP}/readelf-no-soname" "${TMP}/nm-ddk" "${TMP}/strings-ddk" "${TMP}/symver-ok"
+
+# The old production artifact contains generic Wayland property strings but no
+# video bootstrap. That must not count as backend capability.
+expect_verify_fail 'the old production contract with generic Wayland strings only' \
+  'FATAL: SDL artifact is missing the Wayland_bootstrap symbol' \
+  ddk "${TMP}/readelf-ok" "${TMP}/nm-ddk-no-wayland" "${TMP}/strings-generic-wayland" "${TMP}/symver-ok"
+expect_verify_fail 'a Wayland bootstrap without all dynamic runtime SONAMEs' \
+  'FATAL: SDL artifact is missing dynamic Wayland runtime evidence: libwayland-cursor.so.0' \
+  ddk "${TMP}/readelf-ok" "${TMP}/nm-ddk" "${TMP}/strings-wayland-no-cursor" "${TMP}/symver-ok"
+
+make_stub readelf-direct-wayland \
+  "printf '%s\\n' ' 0x0 (SONAME) Library soname: [libSDL3-pocketforge.so.0]' ' 0x1 (NEEDED) Shared library: [libEGL.so.1]' ' 0x1 (NEEDED) Shared library: [libGLESv2.so.2]' ' 0x1 (NEEDED) Shared library: [libwayland-client.so.0]'"
+expect_verify_fail 'a directly linked Wayland client' \
+  "FATAL: SDL artifact links libwayland-client.so.0 directly instead of using SDL's dynamic Wayland loader" \
+  ddk "${TMP}/readelf-direct-wayland" "${TMP}/nm-ddk" "${TMP}/strings-ddk" "${TMP}/symver-ok"
+
 make_stub readelf-rpath \
-  "printf '%s\\n' ' 0x1 (NEEDED) Shared library: [libEGL.so.1]' ' 0x1 (NEEDED) Shared library: [libGLESv2.so.2]' ' 0x0 (RUNPATH) Library runpath: [/tmp]'"
+  "printf '%s\\n' ' 0x0 (SONAME) Library soname: [libSDL3-pocketforge.so.0]' ' 0x1 (NEEDED) Shared library: [libEGL.so.1]' ' 0x1 (NEEDED) Shared library: [libGLESv2.so.2]' ' 0x0 (RUNPATH) Library runpath: [/tmp]'"
 expect_verify_fail 'RUNPATH' 'FATAL: shipped SDL artifact contains RPATH or RUNPATH' \
   ddk "${TMP}/readelf-rpath" "${TMP}/nm-ddk" "${TMP}/strings-ddk" "${TMP}/symver-ok"
 expect_verify_fail 'RUNPATH on an open artifact' 'FATAL: shipped SDL artifact contains RPATH or RUNPATH' \
   open "${TMP}/readelf-rpath" "${TMP}/nm-open" "${TMP}/strings-open" "${TMP}/symver-ok"
 
-make_stub readelf-no-egl "echo ' 0x1 (NEEDED) Shared library: [libGLESv2.so.2]'"
+make_stub readelf-no-egl "printf '%s\\n' ' 0x0 (SONAME) Library soname: [libSDL3-pocketforge.so.0]' ' 0x1 (NEEDED) Shared library: [libGLESv2.so.2]'"
 expect_verify_fail 'a closed artifact without libEGL' 'FATAL: SDL artifact is missing required dependency libEGL.so.1' \
   ddk "${TMP}/readelf-no-egl" "${TMP}/nm-ddk" "${TMP}/strings-ddk" "${TMP}/symver-ok"
 
@@ -139,7 +176,9 @@ expect_verify_fail 'a closed artifact without libEGL' 'FATAL: SDL artifact is mi
 run_verify ddk "${TMP}/readelf-ok" "${TMP}/nm-ddk" "${TMP}/strings-ddk" "${TMP}/symver-ok" \
   >"${TMP}/out" 2>"${TMP}/err"
 grep -Fxq 'sunxifb' "${TMP}/out"
+grep -Fxq 'wayland' "${TMP}/out"
 grep -Fxq 'SUNXIFB_bootstrap' "${TMP}/out"
+grep -Fxq 'Wayland_bootstrap' "${TMP}/out"
 
 expect_verify_fail 'a closed artifact with the KMSDRM string' \
   'FATAL: closed SDL artifact unexpectedly contains the KMSDRM backend' \
@@ -151,7 +190,7 @@ expect_verify_fail 'a closed artifact without the sunxifb backend' \
   'FATAL: closed SDL artifact is missing the sunxifb backend' \
   ddk "${TMP}/readelf-ok" "${TMP}/nm-ddk" "${TMP}/strings-no-sunxifb" "${TMP}/symver-ok"
 expect_verify_fail 'a closed artifact without a symbol table' \
-  'FATAL: closed SDL artifact is missing the SUNXIFB_bootstrap symbol' \
+  'FATAL: SDL artifact is missing the Wayland_bootstrap symbol' \
   ddk "${TMP}/readelf-ok" "${TMP}/nm-stripped" "${TMP}/strings-ddk" "${TMP}/symver-ok"
 
 # --- open model: KMSDRM present, sunxifb absent (tsp-f3fm.218) ---------------
@@ -159,7 +198,9 @@ expect_verify_fail 'a closed artifact without a symbol table' \
 run_verify open "${TMP}/readelf-no-gl" "${TMP}/nm-open" "${TMP}/strings-open" "${TMP}/symver-ok" \
   >"${TMP}/out" 2>"${TMP}/err"
 grep -Fxq 'kmsdrm' "${TMP}/out"
+grep -Fxq 'wayland' "${TMP}/out"
 grep -Fxq 'KMSDRM_bootstrap' "${TMP}/out"
+grep -Fxq 'Wayland_bootstrap' "${TMP}/out"
 if grep -Fxq 'sunxifb' "${TMP}/out" || grep -Fxq 'SUNXIFB_bootstrap' "${TMP}/out"; then
   echo "FAIL: open verification listed a sunxifb backend it should not contain"
   exit 1
@@ -173,7 +214,7 @@ expect_verify_fail 'an open artifact with only the SUNXIFB bootstrap symbol' \
   'FATAL: open SDL artifact contains the SUNXIFB_bootstrap symbol' \
   open "${TMP}/readelf-ok" "${TMP}/nm-open-with-sunxifb" "${TMP}/strings-open" "${TMP}/symver-ok"
 expect_verify_fail 'an open artifact without a symbol table' \
-  'FATAL: open SDL artifact is missing the KMSDRM_bootstrap symbol' \
+  'FATAL: SDL artifact is missing the Wayland_bootstrap symbol' \
   open "${TMP}/readelf-ok" "${TMP}/nm-stripped" "${TMP}/strings-open" "${TMP}/symver-ok"
 expect_verify_fail 'an open artifact without the KMSDRM backend' \
   'FATAL: open SDL artifact is missing compiled KMSDRM evidence: kmsdrm' \
@@ -197,12 +238,13 @@ for tool in "${HOST_CC}" readelf nm strings strip; do
   fi
 done
 printf '%s\n' 'void fixture_dependency(void) {}' >"${TMP}/dependency.c"
-for soname in libEGL.so.1 libGLESv2.so.2 libdrm.so.2 libgbm.so.1; do
+for soname in libEGL.so.1 libGLESv2.so.2 libwayland-client.so.0 libdrm.so.2 libgbm.so.1; do
   "${HOST_CC}" -shared -fPIC -Wl,-soname,"${soname}" \
     -o "${TMP}/${soname}" "${TMP}/dependency.c"
 done
 ln -s libEGL.so.1 "${TMP}/libEGL.so"
 ln -s libGLESv2.so.2 "${TMP}/libGLESv2.so"
+ln -s libwayland-client.so.0 "${TMP}/libwayland-client.so"
 ln -s libdrm.so.2 "${TMP}/libdrm.so"
 ln -s libgbm.so.1 "${TMP}/libgbm.so"
 
@@ -213,7 +255,7 @@ real_elf() {
   shift 3
   printf '%s\n' 'void SDL_DYNAPI_entry(void) {}' "$@" >"${TMP}/${name}.c"
   # shellcheck disable=SC2086
-  "${HOST_CC}" -shared -fPIC -Wl,--no-as-needed -L"${TMP}" \
+  "${HOST_CC}" -shared -fPIC -Wl,--no-as-needed,-soname,libSDL3-pocketforge.so.0 -L"${TMP}" \
     -o "${TMP}/${name}.so" "${TMP}/${name}.c" ${links}
 }
 
@@ -244,39 +286,54 @@ KMSDRM_LINES='const char KMSDRM_bootstrap[] = "kmsdrm";
 const char dynamic_libdrm[] = "libdrm.so.2";
 const char dynamic_libgbm[] = "libgbm.so.1";'
 SUNXIFB_LINES='const char SUNXIFB_bootstrap[] = "sunxifb";'
+WAYLAND_LINES='const char Wayland_bootstrap[] = "wayland";
+const char dynamic_wayland_client[] = "libwayland-client.so.0";
+const char dynamic_wayland_egl[] = "libwayland-egl.so.1";
+const char dynamic_wayland_cursor[] = "libwayland-cursor.so.0";
+const char dynamic_xkbcommon[] = "libxkbcommon.so.0";'
 
 # Open build after tsp-f3fm.218: KMSDRM loaded dynamically, no sunxifb, no GL link.
-real_elf real-open '' -- "${KMSDRM_LINES}"
+real_elf real-open '' -- "${WAYLAND_LINES}" "${KMSDRM_LINES}"
 verify_real open "${TMP}/real-open.so" >"${TMP}/out" 2>"${TMP}/err"
 grep -Fxq 'KMSDRM_bootstrap' "${TMP}/out"
 
 # Open build before tsp-f3fm.218: sunxifb (linking EGL/GLES) beside KMSDRM.
-real_elf real-open-with-sunxifb '-lEGL -lGLESv2' -- "${KMSDRM_LINES}" "${SUNXIFB_LINES}"
+real_elf real-open-with-sunxifb '-lEGL -lGLESv2' -- "${WAYLAND_LINES}" "${KMSDRM_LINES}" "${SUNXIFB_LINES}"
 expect_real_fail 'the pre-tsp-f3fm.218 open build shape' \
   'FATAL: open SDL artifact contains the sunxifb backend' \
   open "${TMP}/real-open-with-sunxifb.so"
 
 # Closed build: sunxifb linking EGL/GLES, no KMSDRM.
-real_elf real-ddk '-lEGL -lGLESv2' -- "${SUNXIFB_LINES}"
+real_elf real-ddk '-lEGL -lGLESv2' -- "${WAYLAND_LINES}" "${SUNXIFB_LINES}"
 verify_real ddk "${TMP}/real-ddk.so" >"${TMP}/out" 2>"${TMP}/err"
 grep -Fxq 'SUNXIFB_bootstrap' "${TMP}/out"
 expect_real_fail 'a closed artifact without EGL/GLES links' \
   'FATAL: SDL artifact is missing required dependency libEGL.so.1' \
   ddk "${TMP}/real-open.so"
 
+real_elf real-ddk-no-wayland '-lEGL -lGLESv2' -- "${SUNXIFB_LINES}"
+expect_real_fail 'the old production contract without the Wayland video backend' \
+  'FATAL: SDL artifact is missing the Wayland_bootstrap symbol' \
+  ddk "${TMP}/real-ddk-no-wayland.so"
+
+real_elf direct-wayland '-lEGL -lGLESv2 -lwayland-client' -- "${WAYLAND_LINES}" "${SUNXIFB_LINES}"
+expect_real_fail 'a directly linked Wayland client' \
+  "FATAL: SDL artifact links libwayland-client.so.0 directly instead of using SDL's dynamic Wayland loader" \
+  ddk "${TMP}/direct-wayland.so"
+
 # A stripped closed artifact still carries the driver-name string but no symbol
 # table; the bootstrap-symbol check must fail closed rather than pass.
 cp "${TMP}/real-ddk.so" "${TMP}/real-ddk-stripped.so"
 strip --strip-all "${TMP}/real-ddk-stripped.so"
 expect_real_fail 'a stripped closed artifact' \
-  'FATAL: closed SDL artifact is missing the SUNXIFB_bootstrap symbol' \
+  'FATAL: SDL artifact is missing the Wayland_bootstrap symbol' \
   ddk "${TMP}/real-ddk-stripped.so"
 
 # A real ELF whose dynamic table directly links every graphics dependency while
 # its symbols and strings otherwise resemble an acceptable open artifact. This
 # must fail specifically on libdrm/libgbm DT_NEEDED rather than on a mocked
 # readelf response.
-real_elf direct-kms '-lEGL -lGLESv2 -ldrm -lgbm' -- "${KMSDRM_LINES}"
+real_elf direct-kms '-lEGL -lGLESv2 -ldrm -lgbm' -- "${WAYLAND_LINES}" "${KMSDRM_LINES}"
 expect_real_fail 'directly linked KMSDRM dependencies' \
   'FATAL: open SDL artifact links libdrm.so directly instead of using dynamic KMSDRM loading' \
   open "${TMP}/direct-kms.so"
@@ -312,6 +369,7 @@ make_stub pkg-config \
   '    shift' \
   '    for module do' \
   '      if [ "${PKG_CONFIG_STUB_MODE:-target}" = missing-gbm ] && [ "${module}" = gbm ]; then exit 1; fi' \
+  '      if [ "${PKG_CONFIG_STUB_MODE:-target}" = missing-wayland-client ] && [ "${module}" = wayland-client ]; then exit 1; fi' \
   '    done' \
   '    exit 0' \
   '    ;;' \
@@ -329,24 +387,27 @@ make_stub pkg-config \
 # The controlled artifact's shape follows ARTIFACT_KIND (default: the model).
 make_stub strings-build \
   'case "${ARTIFACT_KIND:-${PF_GPU_MODEL:-ddk}}" in' \
-  '  open) printf "%s\\n" kmsdrm dummy libdrm.so.2 libgbm.so.1 ;;' \
-  '  open-with-sunxifb) printf "%s\\n" sunxifb kmsdrm dummy libdrm.so.2 libgbm.so.1 ;;' \
-  '  open-missing-kms) printf "%s\\n" dummy libdrm.so.2 libgbm.so.1 ;;' \
-  '  ddk) printf "%s\\n" sunxifb dummy ;;' \
+  '  open) printf "%s\\n" wayland kmsdrm dummy libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libxkbcommon.so.0 libdrm.so.2 libgbm.so.1 ;;' \
+  '  open-with-sunxifb) printf "%s\\n" wayland sunxifb kmsdrm dummy libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libxkbcommon.so.0 libdrm.so.2 libgbm.so.1 ;;' \
+  '  open-missing-kms) printf "%s\\n" wayland dummy libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libxkbcommon.so.0 libdrm.so.2 libgbm.so.1 ;;' \
+  '  ddk) printf "%s\\n" wayland sunxifb dummy libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libxkbcommon.so.0 ;;' \
+  '  ddk-no-wayland) printf "%s\\n" wayland sunxifb dummy ;;' \
   '  *) exit 2 ;;' \
   'esac'
 make_stub nm-build \
   'if [ "${1:-}" = -D ]; then echo "00000000 T SDL_DYNAPI_entry"; exit 0; fi' \
   'case "${ARTIFACT_KIND:-${PF_GPU_MODEL:-ddk}}" in' \
-  '  open) echo "00002000 d KMSDRM_bootstrap" ;;' \
-  '  open-with-sunxifb) printf "%s\\n" "00001000 d SUNXIFB_bootstrap" "00002000 d KMSDRM_bootstrap" ;;' \
-  '  open-missing-kms) echo "00000000 T SDL_DYNAPI_entry" ;;' \
-  '  ddk) echo "00001000 d SUNXIFB_bootstrap" ;;' \
+  '  open) printf "%s\\n" "00000500 d Wayland_bootstrap" "00002000 d KMSDRM_bootstrap" ;;' \
+  '  open-with-sunxifb) printf "%s\\n" "00000500 d Wayland_bootstrap" "00001000 d SUNXIFB_bootstrap" "00002000 d KMSDRM_bootstrap" ;;' \
+  '  open-missing-kms) echo "00000500 d Wayland_bootstrap" ;;' \
+  '  ddk) printf "%s\\n" "00000500 d Wayland_bootstrap" "00001000 d SUNXIFB_bootstrap" ;;' \
+  '  ddk-no-wayland) echo "00001000 d SUNXIFB_bootstrap" ;;' \
   '  *) exit 2 ;;' \
   'esac'
 make_stub readelf-build \
+  'echo " 0x0 (SONAME) Library soname: [libSDL3-pocketforge.so.0]"' \
   'case "${ARTIFACT_KIND:-${PF_GPU_MODEL:-ddk}}" in' \
-  '  ddk|open-with-sunxifb) printf "%s\\n" " 0x1 (NEEDED) Shared library: [libEGL.so.1]" " 0x1 (NEEDED) Shared library: [libGLESv2.so.2]" ;;' \
+  '  ddk|ddk-no-wayland|open-with-sunxifb) printf "%s\\n" " 0x1 (NEEDED) Shared library: [libEGL.so.1]" " 0x1 (NEEDED) Shared library: [libGLESv2.so.2]" ;;' \
   '  *) echo " 0x1 (NEEDED) Shared library: [libc.so.6]" ;;' \
   'esac'
 
@@ -398,11 +459,15 @@ forbid_cmake_arg() {
 run_build open open target >"${TMP}/build-out" 2>"${TMP}/build-err"
 require_cmake_arg "${TMP}/cmake-open-open-target.log" '-DSDL_KMSDRM=ON'
 require_cmake_arg "${TMP}/cmake-open-open-target.log" '-DSDL_KMSDRM_SHARED=ON'
+require_cmake_arg "${TMP}/cmake-open-open-target.log" '-DSDL_WAYLAND=ON'
+require_cmake_arg "${TMP}/cmake-open-open-target.log" '-DSDL_WAYLAND_SHARED=ON'
 # tsp-f3fm.218: the open model compiles no sunxifb.
 require_cmake_arg "${TMP}/cmake-open-open-target.log" '-DSDL_SUNXIFB=OFF'
 forbid_cmake_arg "${TMP}/cmake-open-open-target.log" '-DSDL_SUNXIFB=ON'
 grep -Fxq 'kmsdrm' "${TMP}/build-out"
+grep -Fxq 'wayland' "${TMP}/build-out"
 grep -Fxq 'KMSDRM_bootstrap' "${TMP}/build-out"
+grep -Fxq 'Wayland_bootstrap' "${TMP}/build-out"
 if grep -Fxq 'sunxifb' "${TMP}/build-out"; then
   echo "FAIL: open build reported a sunxifb backend"
   exit 1
@@ -411,9 +476,19 @@ fi
 run_build ddk ddk target >"${TMP}/build-out" 2>"${TMP}/build-err"
 require_cmake_arg "${TMP}/cmake-ddk-ddk-target.log" '-DSDL_KMSDRM=OFF'
 require_cmake_arg "${TMP}/cmake-ddk-ddk-target.log" '-DSDL_SUNXIFB=ON'
+require_cmake_arg "${TMP}/cmake-ddk-ddk-target.log" '-DSDL_WAYLAND=ON'
+require_cmake_arg "${TMP}/cmake-ddk-ddk-target.log" '-DSDL_WAYLAND_SHARED=ON'
 forbid_cmake_arg "${TMP}/cmake-ddk-ddk-target.log" '-DSDL_SUNXIFB=OFF'
 grep -Fxq 'sunxifb' "${TMP}/build-out"
+grep -Fxq 'wayland' "${TMP}/build-out"
 grep -Fxq 'SUNXIFB_bootstrap' "${TMP}/build-out"
+grep -Fxq 'Wayland_bootstrap' "${TMP}/build-out"
+
+if run_build ddk ddk-no-wayland target >"${TMP}/build-out" 2>"${TMP}/build-err"; then
+  echo "FAIL: closed build accepted the old production artifact without Wayland"
+  exit 1
+fi
+grep -Fq 'FATAL: SDL artifact is missing the Wayland_bootstrap symbol' "${TMP}/build-err"
 
 # The canonical entry point runs the real verifier: an open artifact that still
 # carries sunxifb fails the build.
@@ -451,6 +526,12 @@ if run_build open open missing-gbm >"${TMP}/build-out" 2>"${TMP}/build-err"; the
 fi
 grep -Fq "FATAL: target pkg-config module 'gbm' is required" "${TMP}/build-err"
 
+if run_build ddk ddk missing-wayland-client >"${TMP}/build-out" 2>"${TMP}/build-err"; then
+  echo "FAIL: closed build accepted missing target Wayland metadata"
+  exit 1
+fi
+grep -Fq "FATAL: target pkg-config module 'wayland-client' is required" "${TMP}/build-err"
+
 if run_build open open host >"${TMP}/build-out" 2>"${TMP}/build-err"; then
   echo "FAIL: open build accepted host-architecture pkg-config metadata"
   exit 1
@@ -469,4 +550,4 @@ if run_build invalid ddk target >"${TMP}/build-out" 2>"${TMP}/build-err"; then
 fi
 grep -Fq "FATAL: PF_GPU_MODEL must be 'ddk' or 'open'" "${TMP}/build-err"
 
-echo "PASS: open/closed SDL build and artifact contracts fail closed (open: KMSDRM without sunxifb; ddk: sunxifb without KMSDRM)"
+echo "PASS: open/closed SDL contracts require dynamic Wayland plus the model-native backend and target-only metadata"
