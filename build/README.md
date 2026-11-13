@@ -62,8 +62,8 @@ Shipped at `/opt/cmake/toolchain-arm-10.3-2021.07.cmake`. Symlink convenience
 path at `/opt/cmake/toolchain.cmake`. Pass it via `-DCMAKE_TOOLCHAIN_FILE=`.
 
 Sysroot is `/opt/arm-10.3-2021.07/aarch64-none-linux-gnu/libc`. It has glibc
-2.33 plus the target ARM64 SDL dependencies, including libdrm and GBM headers,
-libraries, and rewritten pkg-config metadata. EGL/GLES2 come from the selected
+2.33 plus the target ARM64 SDL dependencies, including Wayland, xkbcommon,
+libdrm and GBM headers, libraries, and rewritten pkg-config metadata. EGL/GLES2 come from the selected
 graphics prefix: the PowerVR DDK under `/work/blobs` for `PF_GPU_MODEL=ddk`, or
 the caller-provided `SUNXIFB_MESA_ROOT` for `PF_GPU_MODEL=open`. The toolchain
 adds that selected prefix to `CMAKE_FIND_ROOT_PATH` before SDL probes EGL.
@@ -90,6 +90,13 @@ the same `/work/out` across GPU models is supported: the recipe fingerprints
 `PF_GPU_MODEL` and the selected EGL/GLES root and clears CMake's discovery
 cache when either changes, while preserving the published artifact paths.
 
+Both GPU models compile SDL's Wayland video backend before their native
+fallback. Wayland client, EGL-window, cursor, and xkbcommon libraries are
+resolved from target-only pkg-config metadata and loaded dynamically at
+runtime. A compositor-hosted app therefore selects `wayland`; a Steam Link
+session without a Wayland socket falls through to `sunxifb` on the DDK model.
+Configuration fails before CMake on missing target metadata or host paths.
+
 The shipped `libSDL3-pocketforge.so.0` must have neither `DT_RPATH` nor
 `DT_RUNPATH`: a host build path is not a valid runtime dependency, and a
 trailing empty loader-path component would search the current working
@@ -100,6 +107,13 @@ exact embedded driver-name strings (`sunxifb`, `kmsdrm`) and the video
 bootstrap symbols in the unstripped symbol table (`SUNXIFB_bootstrap`,
 `KMSDRM_bootstrap`). Every model requires one bootstrap symbol to be present,
 so a stripped library fails rather than passing the absence checks.
+
+Every artifact also requires `Wayland_bootstrap` plus the dynamic runtime
+SONAME strings for libwayland-client, libwayland-egl, libwayland-cursor and
+libxkbcommon, while rejecting direct `DT_NEEDED` entries for those libraries.
+This structural check distinguishes the video backend from generic Wayland
+property strings present in SDL headers and unrelated subsystems. Verification
+also pins the artifact SONAME to `libSDL3-pocketforge.so.0`.
 
 - `ddk`: direct `DT_NEEDED` libEGL.so.1 and libGLESv2.so.2 (sunxifb links
   them), `sunxifb` and `SUNXIFB_bootstrap` present, no KMSDRM string or symbol.

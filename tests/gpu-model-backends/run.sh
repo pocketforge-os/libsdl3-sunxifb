@@ -10,14 +10,16 @@
 #                ELF controls).
 #   2. open      the real build/build-libsdl3.sh, PF_GPU_MODEL=open, with the
 #                pinned toolchain file. The built library must contain KMSDRM
-#                and no sunxifb: checked by the build's own verifier and again
-#                here from the build config, the symbol table, the strings and
-#                SDL's own runtime video-driver list (run under qemu-aarch64).
-#   3. ddk       the same for PF_GPU_MODEL=ddk: sunxifb and no KMSDRM.
+#                and no sunxifb, plus dynamic Wayland: checked by the build's
+#                own verifier and again here from the build config, the symbol
+#                table, the strings and SDL's own runtime video-driver list
+#                (run under qemu-aarch64).
+#   3. ddk       the same for PF_GPU_MODEL=ddk: Wayland plus sunxifb, no KMSDRM.
 #   4. red       the base commit's build logic: the fixture contract must fail
-#                against it, and the open library it builds must fail this
-#                tree's verifier and list sunxifb ahead of kmsdrm (the
-#                selection that broke Poolsuite). Skipped once the base has
+#                against it, and the closed-DDK singleton it builds must fail
+#                this
+#                tree's verifier because it has no Wayland bootstrap (the
+#                production contract that broke Pool Suite). Skipped once the base has
 #                the fix.
 #
 # Only the vendor graphics input is substituted. The real DDK (pocketforge-os/
@@ -117,12 +119,15 @@ inspect() {
     local out=$1 so=$1/$SO_NAME config
     config=$(find "$out" -name SDL_build_config.h -path '*include-config*' | head -n 1)
     [ -n "$config" ] || fail "no SDL_build_config.h under $out"
-    grep -Eo '^#define SDL_VIDEO_DRIVER_(SUNXIFB|KMSDRM) 1' "$config" \
+    grep -Eo '^#define SDL_VIDEO_DRIVER_(SUNXIFB|KMSDRM|WAYLAND) 1' "$config" \
         | sed 's/^#define /config: /;s/ 1$//' || true
-    "${TRIPLET}-nm" "$so" | awk 'NF { print $NF }' | grep -Ex '(SUNXIFB|KMSDRM)_bootstrap' \
+    "${TRIPLET}-nm" "$so" | awk 'NF { print $NF }' | grep -Ex '(SUNXIFB|KMSDRM|Wayland)_bootstrap' \
         | sed 's/^/symbol: /' || true
-    "${TRIPLET}-strings" "$so" | grep -Ex 'sunxifb|kmsdrm' | sort -u | sed 's/^/string: /' || true
-    "${TRIPLET}-readelf" -d "$so" | grep -F '(NEEDED)' | grep -Eo '\[lib(EGL|GLESv2)\.so[^]]*\]' \
+    "${TRIPLET}-strings" "$so" | grep -Ex 'wayland|sunxifb|kmsdrm' | sort -u | sed 's/^/string: /' || true
+    "${TRIPLET}-strings" "$so" \
+        | grep -Ex 'libwayland-(client|egl|cursor)\.so\.[0-9]+|libxkbcommon\.so\.[0-9]+' \
+        | sort -u | sed 's/^/runtime: /' || true
+    "${TRIPLET}-readelf" -d "$so" | grep -F '(NEEDED)' | grep -Eo '\[lib(EGL|GLESv2|xkbcommon|wayland-[^.]*)\.so[^]]*\]' \
         | sed 's/^/needed: /' || true
     video_drivers "$out" | sed 's/^/driver: /'
 }
@@ -140,36 +145,50 @@ expect() {
 step "2. open: real build-libsdl3.sh, PF_GPU_MODEL=open"
 build_model open "$SRC" "$WORK/out-open"
 inspect "$WORK/out-open" | tee "$WORK/facts-open"
-for line in 'config: SDL_VIDEO_DRIVER_KMSDRM' 'symbol: KMSDRM_bootstrap' 'string: kmsdrm' 'driver: kmsdrm'; do
+for line in 'config: SDL_VIDEO_DRIVER_WAYLAND' 'symbol: Wayland_bootstrap' 'string: wayland' 'driver: wayland' \
+    'runtime: libwayland-client.so.0' 'runtime: libwayland-egl.so.1' \
+    'runtime: libwayland-cursor.so.0' 'runtime: libxkbcommon.so.0' \
+    'config: SDL_VIDEO_DRIVER_KMSDRM' 'symbol: KMSDRM_bootstrap' 'string: kmsdrm' 'driver: kmsdrm'; do
     expect "$WORK/facts-open" present "$line"
 done
 for line in 'config: SDL_VIDEO_DRIVER_SUNXIFB' 'symbol: SUNXIFB_bootstrap' 'string: sunxifb' 'driver: sunxifb' \
     'needed: [libEGL.so.1]' 'needed: [libGLESv2.so.2]'; do
     expect "$WORK/facts-open" absent "$line"
 done
-first=$(sed -n 's/^driver: //p' "$WORK/facts-open" | head -n 1)
-[ "$first" = kmsdrm ] || fail "open: SDL tries '$first' before kmsdrm"
-echo "ok: the open library compiles KMSDRM and no sunxifb; SDL tries kmsdrm first"
+if grep -E '^needed: \[lib(wayland-|xkbcommon)' "$WORK/facts-open"; then
+    fail "open: Wayland runtime libraries are directly linked"
+fi
+order=$(sed -n 's/^driver: //p' "$WORK/facts-open" | grep -Ex 'wayland|kmsdrm' | paste -sd' ')
+[ "$order" = 'wayland kmsdrm' ] || fail "open: expected Wayland then KMSDRM, got '$order'"
+echo "ok: the open library tries dynamic Wayland before KMSDRM and contains no sunxifb"
 
 step "3. ddk: real build-libsdl3.sh, PF_GPU_MODEL=ddk"
 build_model ddk "$SRC" "$WORK/out-ddk"
 inspect "$WORK/out-ddk" | tee "$WORK/facts-ddk"
-for line in 'config: SDL_VIDEO_DRIVER_SUNXIFB' 'symbol: SUNXIFB_bootstrap' 'string: sunxifb' 'driver: sunxifb' \
+for line in 'config: SDL_VIDEO_DRIVER_WAYLAND' 'symbol: Wayland_bootstrap' 'string: wayland' 'driver: wayland' \
+    'runtime: libwayland-client.so.0' 'runtime: libwayland-egl.so.1' \
+    'runtime: libwayland-cursor.so.0' 'runtime: libxkbcommon.so.0' \
+    'config: SDL_VIDEO_DRIVER_SUNXIFB' 'symbol: SUNXIFB_bootstrap' 'string: sunxifb' 'driver: sunxifb' \
     'needed: [libEGL.so.1]' 'needed: [libGLESv2.so.2]'; do
     expect "$WORK/facts-ddk" present "$line"
 done
 for line in 'config: SDL_VIDEO_DRIVER_KMSDRM' 'symbol: KMSDRM_bootstrap' 'string: kmsdrm' 'driver: kmsdrm'; do
     expect "$WORK/facts-ddk" absent "$line"
 done
-echo "ok: the ddk library compiles sunxifb and no KMSDRM"
+if grep -E '^needed: \[lib(wayland-|xkbcommon)' "$WORK/facts-ddk"; then
+    fail "ddk: Wayland runtime libraries are directly linked"
+fi
+order=$(sed -n 's/^driver: //p' "$WORK/facts-ddk" | grep -Ex 'wayland|sunxifb' | paste -sd' ')
+[ "$order" = 'wayland sunxifb' ] || fail "ddk: expected Wayland then sunxifb, got '$order'"
+echo "ok: the ddk library tries dynamic Wayland before sunxifb and contains no KMSDRM"
 
 step "4. red: the base commit's build logic"
 # shellcheck disable=SC2016  # the literal recipe text, not an expansion
-FIXED_RECIPE='-DSDL_SUNXIFB="${SDL_SUNXIFB}"'
+FIXED_RECIPE='-DSDL_WAYLAND=ON'
 if [ -z "$BASE_SHA" ] || ! git -C "$SRC" cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
     echo "SKIP: no base commit given (BASE_SHA)"
 elif git -C "$SRC" show "$BASE_SHA:build/build-libsdl3.sh" | grep -F -- "$FIXED_RECIPE" >/dev/null; then
-    echo "SKIP: base $BASE_SHA already selects sunxifb by GPU model"
+    echo "SKIP: base $BASE_SHA already enables the Wayland video backend"
 else
     base=$WORK/base-src
     mkdir -p "$base"
@@ -182,21 +201,20 @@ else
     fi
     grep -E '^FAIL: ' "$WORK/red-fixture.log"
 
-    # The base open library: its own verifier accepts it, this tree's must not.
-    build_model open "$base" "$WORK/out-base-open"
-    inspect "$WORK/out-base-open" | tee "$WORK/facts-base-open"
-    expect "$WORK/facts-base-open" present 'symbol: SUNXIFB_bootstrap'
-    expect "$WORK/facts-base-open" present 'driver: kmsdrm'
-    expect "$WORK/facts-base-open" present 'driver: sunxifb'
-    order=$(sed -n 's/^driver: //p' "$WORK/facts-base-open" | grep -Ex 'sunxifb|kmsdrm' | paste -sd' ')
-    [ "$order" = "sunxifb kmsdrm" ] || fail "base open: expected SDL to try sunxifb before kmsdrm, got '$order'"
-    if PF_GPU_MODEL=open "$SRC/build/verify-libsdl3-artifact.sh" "$WORK/out-base-open/$SO_NAME" \
+    # The base closed-DDK singleton: its own verifier accepts it, this tree's must not.
+    build_model ddk "$base" "$WORK/out-base-ddk"
+    inspect "$WORK/out-base-ddk" | tee "$WORK/facts-base-ddk"
+    expect "$WORK/facts-base-ddk" absent 'symbol: Wayland_bootstrap'
+    expect "$WORK/facts-base-ddk" absent 'driver: wayland'
+    expect "$WORK/facts-base-ddk" present 'symbol: SUNXIFB_bootstrap'
+    expect "$WORK/facts-base-ddk" present 'driver: sunxifb'
+    if PF_GPU_MODEL=ddk "$SRC/build/verify-libsdl3-artifact.sh" "$WORK/out-base-ddk/$SO_NAME" \
         >"$WORK/red-verify.log" 2>&1; then
-        fail "this tree's verifier accepted the base open library"
+        fail "this tree's verifier accepted the base closed-DDK singleton"
     fi
-    grep -F 'FATAL: open SDL artifact contains the sunxifb backend' "$WORK/red-verify.log" \
-        || { cat "$WORK/red-verify.log" >&2; fail "the base open library failed verification, but not on sunxifb"; }
-    echo "ok: the base open library carries sunxifb ahead of kmsdrm (the defect) and this tree's verifier refuses it"
+    grep -F 'FATAL: SDL artifact is missing the Wayland_bootstrap symbol' "$WORK/red-verify.log" \
+        || { cat "$WORK/red-verify.log" >&2; fail "the base closed-DDK singleton failed verification, but not on Wayland"; }
+    echo "ok: the base closed-DDK singleton lacks Wayland (the production defect) and this tree's verifier refuses it"
 fi
 
 step "RESULT: PASS"

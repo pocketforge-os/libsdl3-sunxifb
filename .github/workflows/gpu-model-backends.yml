@@ -1,6 +1,7 @@
 # gpu-model-backends - the GPU model selects the compiled SDL display backend
 # (tsp-f3fm.218): the open Mesa model builds KMSDRM and no sunxifb, the closed
-# DDK builds sunxifb and no KMSDRM. tests/gpu-model-backends/run.sh runs the
+# DDK builds sunxifb and no KMSDRM. Both also build dynamic Wayland ahead of
+# their native fallback. tests/gpu-model-backends/run.sh runs the
 # fixture contract (build/test-build-libsdl3-contract.sh), then the real
 # build/build-libsdl3.sh for both models in the pinned cross-build container,
 # asserts on the built libraries, and shows the base commit's build logic fails.
@@ -25,6 +26,8 @@ on:
       - sdl3/src/video/SDL_egl.c
       - sdl3/src/video/kmsdrm/**
       - sdl3/src/video/sunxifb/**
+      - sdl3/src/video/wayland/**
+      - sdl3/wayland-protocols/**
 
 permissions:
   contents: read

@@ -12,11 +12,13 @@
 # with `Couldn't initialize SDL: SDL not built with joystick support`. This
 # recipe is the corrected baseline.
 #
-# Subsystems explicitly OFF: video backends our BSP can't drive (X11, Wayland,
-# Vivante, RPi), Vulkan (no PowerVR Vulkan ICD), OpenGL (we use OpenGL ES),
+# Subsystems explicitly OFF: video backends our BSP can't drive (X11, Vivante,
+# RPi), Vulkan (no PowerVR Vulkan ICD), OpenGL (we use OpenGL ES),
 # Camera/Tray (not needed), Static library (we ship shared only). The GPU
 # model selects exactly one native display backend: KMSDRM for the open Mesa
-# model, sunxifb for the closed DDK (tsp-f3fm.218).
+# model, sunxifb for the closed DDK (tsp-f3fm.218). Both also carry Wayland for
+# compositor-hosted apps; its client libraries are loaded dynamically so a
+# framebuffer Steam Link session can still fall through to the native backend.
 #
 # sunxifb is compiled only for the closed DDK. SDL bootstraps sunxifb before
 # KMSDRM and takes the first driver that creates, so an open build carrying both
@@ -87,17 +89,16 @@ esac
 export PF_GPU_MODEL
 
 # Never let CMake's host pkg-config defaults satisfy cross dependencies. The
-# standalone container rewrites target .pc prefixes into this directory. For
-# the open model, fail before configuration unless both KMSDRM dependencies are
-# present and every path advertised by their metadata remains inside the ARM64
-# sysroot.
+# standalone container rewrites target .pc prefixes into this directory. Fail
+# before configuration unless every required module is present and every path
+# advertised by its metadata remains inside the ARM64 sysroot.
 export PKG_CONFIG_LIBDIR=${TARGET_PKG_CONFIG_LIBDIR}
 unset PKG_CONFIG_PATH
 
 require_target_pkg_config() {
   module=$1
   if ! pkg-config --exists "${module}"; then
-    echo "FATAL: target pkg-config module '${module}' is required for PF_GPU_MODEL=open (${TARGET_PKG_CONFIG_LIBDIR})" >&2
+    echo "FATAL: target pkg-config module '${module}' is required (${TARGET_PKG_CONFIG_LIBDIR})" >&2
     exit 1
   fi
 
@@ -117,6 +118,11 @@ require_target_pkg_config() {
     exit 1
   fi
 }
+
+require_target_pkg_config wayland-client
+require_target_pkg_config wayland-egl
+require_target_pkg_config wayland-cursor
+require_target_pkg_config xkbcommon
 
 if [ "${PF_GPU_MODEL}" = open ]; then
   require_target_pkg_config libdrm
@@ -147,7 +153,8 @@ cmake -G Ninja \
   -DSUNXIFB_DDK_ROOT="${DDK_ROOT}" \
   \
   -DSDL_SUNXIFB="${SDL_SUNXIFB}" \
-  -DSDL_X11=OFF -DSDL_WAYLAND=OFF \
+  -DSDL_X11=OFF -DSDL_WAYLAND=ON -DSDL_WAYLAND_SHARED=ON \
+  -DSDL_WAYLAND_LIBDECOR=OFF \
   -DSDL_KMSDRM="${SDL_KMSDRM}" -DSDL_KMSDRM_SHARED=ON \
   -DSDL_VIVANTE=OFF -DSDL_RPI=OFF -DSDL_OFFSCREEN=OFF \
   -DSDL_DUMMYVIDEO=ON \
